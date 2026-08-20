@@ -38,6 +38,7 @@ class StorageScanTests(unittest.TestCase):
         records = [
             {"timestamp": stamp, "type": "session_meta", "payload": {"id": "native-id", "cwd": "/code/private-project"}},
             {"timestamp": stamp, "type": "response_item", "payload": {"type": "message", "content": secret}},
+            {"timestamp": stamp, "type": "response_item", "payload": {"type": "function_call", "call_id": "call-id", "name": "exec_command", "arguments": secret}},
             {"timestamp": stamp, "type": "turn_context", "payload": {"turn_id": "turn", "model": "test-model"}},
             {"timestamp": stamp, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": total, "last_token_usage": total}}},
         ]
@@ -64,13 +65,14 @@ class StorageScanTests(unittest.TestCase):
         self.assertEqual(status["sessions"], 1)
         self.assertEqual(status["turns"], 1)
         self.assertEqual(dashboard["windows"]["30d"]["total_tokens"], 125)
-        self.assertEqual(dashboard["rankings"]["tools"][0]["label"], "Codex")
-        self.assertEqual(dashboard["rankings"]["tools"][0]["share"], 1)
+        self.assertEqual(dashboard["rankings"]["native_tools"][0]["label"], "exec_command")
+        self.assertEqual(dashboard["rankings"]["native_tools"][0]["share"], 1)
         self.assertEqual(len(dashboard["heatmap"]["dates"]), 30)
         self.assertEqual(dashboard["heatmap"]["scale"], "shared_log_absolute")
-        self.assertTrue(
-            any(cell["tokens"] == 125 for cell in dashboard["heatmap"]["tools"][0]["cells"])
-        )
+        tool = dashboard["heatmap"]["tools"][0]
+        self.assertEqual(tool["calls"], 1)
+        self.assertEqual(tool["token_precision"], "unknown")
+        self.assertEqual(tool["native_tokens"], 0)
         self.assertEqual(dashboard["rankings"]["projects"][0]["label"], "private-project")
         self.assertNotIn(secret.encode(), self.database.read_bytes())
         self.assertNotIn(str(self.source).encode(), self.database.read_bytes())
@@ -139,7 +141,28 @@ class StorageScanTests(unittest.TestCase):
         finally:
             store.close()
 
-    def test_tool_attribution_and_heatmap_cover_codex_and_claude(self):
+    def test_missing_native_call_ids_are_not_deduplicated_across_sources(self):
+        self.write_session()
+        original = self.source / "session.jsonl"
+        records = [json.loads(line) for line in original.read_text(encoding="utf-8").splitlines()]
+        for record in records:
+            payload = record.get("payload", {})
+            if payload.get("type") == "function_call":
+                payload.pop("call_id", None)
+        original.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+        duplicate_root = self.root / "duplicate-sessions"
+        duplicate_root.mkdir()
+        (duplicate_root / "copy.jsonl").write_text(original.read_text(encoding="utf-8"), encoding="utf-8")
+        scan([self.target(), self.target(duplicate_root)], self.database, self.pricing)
+        store = Store(self.database)
+        try:
+            tool = store.dashboard(30)["heatmap"]["tools"][0]
+        finally:
+            store.close()
+        self.assertEqual(tool["label"], "exec_command")
+        self.assertEqual(tool["calls"], 2)
+
+    def test_native_tool_call_heatmap_deduplicates_transcripts_and_keeps_tokens_unknown(self):
         self.write_session()
         claude_root = self.root / "claude-projects"
         claude_root.mkdir()
@@ -152,7 +175,7 @@ class StorageScanTests(unittest.TestCase):
                 "id": "message-id",
                 "model": "claude-test",
                 "role": "assistant",
-                "content": "CLAUDE_PRIVATE_CONTENT_MUST_NOT_BE_STORED",
+                "content": [{"type": "tool_use", "id": "tool-native-id", "name": "Read", "input": "CLAUDE_PRIVATE_CONTENT_MUST_NOT_BE_STORED"}],
                 "usage": {
                     "input_tokens": 5,
                     "cache_creation_input_tokens": 10,
@@ -186,25 +209,22 @@ class StorageScanTests(unittest.TestCase):
         finally:
             store.close()
         tools = {item["label"]: item for item in dashboard["heatmap"]["tools"]}
-        self.assertEqual(set(tools), {"Codex", "Claude Code"})
-        self.assertEqual(tools["Codex"]["total_tokens"], 125)
-        self.assertEqual(tools["Claude Code"]["total_tokens"], 55)
-        self.assertAlmostEqual(tools["Claude Code"]["share"], 55 / 180)
-        self.assertEqual(sum(cell["tokens"] or 0 for cell in tools["Claude Code"]["cells"]), 55)
+        self.assertEqual(set(tools), {"exec_command", "Read"})
+        self.assertEqual(tools["Read"]["calls"], 1)
+        self.assertEqual(tools["Read"]["share"], .5)
+        self.assertEqual(tools["Read"]["token_precision"], "unknown")
+        self.assertEqual(sum(cell["calls"] for cell in tools["Read"]["cells"]), 1)
         self.assertNotIn(b"CLAUDE_PRIVATE_CONTENT_MUST_NOT_BE_STORED", self.database.read_bytes())
 
-    def test_unavailable_source_cells_are_not_reported_as_zero(self):
+    def test_unavailable_source_does_not_invent_tool_rows(self):
         missing = self.root / "missing-claude"
         scan([self.target(missing, "claude")], self.database, self.pricing)
         store = Store(self.database)
         try:
-            tool = store.dashboard(7)["heatmap"]["tools"][0]
+            tools = store.dashboard(7)["heatmap"]["tools"]
         finally:
             store.close()
-        self.assertEqual(tool["availability"], "unavailable")
-        self.assertTrue(
-            all(cell["tokens"] is None and cell["status"] == "unknown" for cell in tool["cells"])
-        )
+        self.assertEqual(tools, [])
 
     def test_legacy_path_schema_is_rebuilt_without_path_bytes(self):
         legacy = self.root / "legacy.sqlite3"

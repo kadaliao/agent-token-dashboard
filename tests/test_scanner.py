@@ -77,6 +77,25 @@ class ScannerTests(unittest.TestCase):
         self.assertFalse(turn.available["reasoning_output_tokens"])
         self.assertEqual(turn.usage["reasoning_output_tokens"], 0)
 
+    def test_codex_collects_native_call_name_without_arguments_or_turn_token_split(self):
+        path = self.write_log([
+            record("response_item", {"type": "function_call", "call_id": "call-native", "name": "exec_command", "arguments": "PRIVATE_ARGUMENT"}),
+            record("response_item", {"type": "custom_tool_call", "call_id": "call-custom", "name": "Grab", "input": "PRIVATE_INPUT"}),
+            record("event_msg", {"type": "token_count", "info": {"total_token_usage": usage(10, 0, 2, 0), "last_token_usage": usage(10, 0, 2, 0)}}),
+        ])
+        parsed = parse_codex_file(path, self.pricing)
+        self.assertEqual([call.name for call in parsed.tool_calls], ["exec_command", "Grab"])
+        self.assertTrue(all(call.token_count is None and call.token_precision == "unknown" for call in parsed.tool_calls))
+
+    def test_missing_call_ids_do_not_merge_same_name_and_timestamp(self):
+        path = self.write_log([
+            record("response_item", {"type": "function_call", "name": "exec_command"}),
+            record("response_item", {"type": "function_call", "name": "exec_command"}),
+        ])
+        calls = parse_codex_file(path, self.pricing).tool_calls
+        self.assertEqual(len(calls), 2)
+        self.assertNotEqual(calls[0].event_key, calls[1].event_key)
+
     def test_claude_native_usage_is_deduplicated_and_reasoning_stays_unknown(self):
         message = {
             "id": "message-native-id",
@@ -111,6 +130,16 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(turn.usage["output_tokens"], 11)
         self.assertFalse(turn.available["reasoning_output_tokens"])
         self.assertEqual(turn.precision, "native_message_usage")
+
+    def test_claude_collects_tool_use_name_without_input_or_message_text(self):
+        path = self.write_log([{
+            "type": "assistant", "timestamp": "2026-08-20T02:00:00Z", "uuid": "record-id",
+            "message": {"id": "message-id", "model": "claude-test", "usage": {"input_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 1},
+                        "content": [{"type": "tool_use", "id": "tool-id", "name": "Read", "input": {"path": "PRIVATE_PATH"}}, {"type": "text", "text": "PRIVATE_TEXT"}]},
+        }])
+        parsed = parse_claude_file(path, self.pricing)
+        self.assertEqual([call.name for call in parsed.tool_calls], ["Read"])
+        self.assertEqual(parsed.tool_calls[0].token_precision, "unknown")
 
 
 if __name__ == "__main__":

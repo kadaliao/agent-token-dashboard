@@ -1,5 +1,5 @@
 const state = { days: 30, dashboard: null };
-const TOOL_COLORS = { codex: "#F59E42", claude: "#E56B5D" };
+const TOOL_COLORS = ["#F59E42", "#59B8A8", "#73A9E8", "#E56B5D", "#CBD2CC"];
 
 const formatTokens = (value) => {
   if (value === null || value === undefined) return "Unknown";
@@ -71,12 +71,12 @@ function heatDateLabel(date, index, count) {
 function renderHeatmap(data) {
   const target = document.getElementById("heatmap");
   target.replaceChildren();
-  const { dates, max_tokens: maxTokens, tools } = data;
+  const { dates, max_calls: maxCalls, tools } = data;
   target.style.gridTemplateColumns = `minmax(190px, 240px) repeat(${dates.length}, 28px)`;
   target.setAttribute("aria-rowcount", String(tools.length + 1));
   target.setAttribute("aria-colcount", String(dates.length + 1));
 
-  const corner = make("div", "heat-corner", "Tool total / share");
+  const corner = make("div", "heat-corner", "Calls / share / tool tokens");
   corner.setAttribute("role", "columnheader");
   target.append(corner);
   dates.forEach((date, index) => {
@@ -87,16 +87,19 @@ function renderHeatmap(data) {
     target.append(header);
   });
 
-  for (const tool of tools) {
-    const color = TOOL_COLORS[tool.key] || "#59B8A8";
+  for (const [index, tool] of tools.entries()) {
+    const color = TOOL_COLORS[index % TOOL_COLORS.length];
     const rowHeader = make("div", "tool-row-header");
     rowHeader.setAttribute("role", "rowheader");
     rowHeader.style.setProperty("--tool-color", color);
     const identity = make("span", "tool-identity");
     identity.append(make("span", "tool-swatch"), make("strong", "", tool.label));
-    const share = tool.availability === "unavailable"
-      ? "Unavailable"
-      : `${formatTokens(tool.total_tokens)} tokens · ${(tool.share * 100).toFixed(tool.share >= .1 ? 1 : 2)}%`;
+    const tokenText = tool.token_precision === "native"
+      ? `${formatTokens(tool.native_tokens)} native tok`
+      : tool.token_precision === "estimated"
+        ? `${formatTokens(tool.estimated_tokens)} est. tok`
+        : "token unknown";
+    const share = `${tool.calls.toLocaleString()} calls · ${(tool.share * 100).toFixed(tool.share >= .1 ? 1 : 2)}% · ${tokenText}`;
     rowHeader.append(identity, make("span", "tool-share", share));
     target.append(rowHeader);
 
@@ -104,24 +107,27 @@ function renderHeatmap(data) {
       const node = make("div", "heat-cell");
       node.setAttribute("role", "gridcell");
       node.tabIndex = 0;
-      const exact = cell.tokens === null ? "usage unavailable" : `${cell.tokens.toLocaleString()} tokens`;
-      const label = `${tool.label}, ${cell.date}: ${exact}`;
+      const tokenDetail = cell.token_precision === "native" ? `${cell.native_tokens.toLocaleString()} native tokens`
+        : cell.token_precision === "estimated" ? `${cell.estimated_tokens.toLocaleString()} estimated tokens`
+          : "tool token attribution unknown";
+      const label = `${tool.label}, ${cell.date}: ${cell.calls.toLocaleString()} calls; ${tokenDetail}`;
       node.setAttribute("aria-label", label);
       node.title = label;
       if (cell.status === "unknown") {
         node.classList.add("unknown-cell");
-      } else if (cell.tokens === 0) {
+      } else if (cell.calls === 0) {
         node.classList.add("zero-cell");
       } else {
-        const intensity = maxTokens ? Math.log1p(cell.tokens) / Math.log1p(maxTokens) : 0;
+        const intensity = maxCalls ? Math.log1p(cell.calls) / Math.log1p(maxCalls) : 0;
         node.style.backgroundColor = hexToRgba(color, .14 + intensity * .86);
       }
       if (cell.status === "partial") node.classList.add("partial-cell");
       target.append(node);
     }
   }
-  document.getElementById("legend-max").textContent = formatTokens(maxTokens);
-  document.getElementById("heatmap-total").textContent = `${formatTokens(state.dashboard.range.total_tokens)} tokens · ${tools.length} tools · ${dates.length} local days`;
+  document.getElementById("legend-max").textContent = `${formatTokens(maxCalls)} calls`;
+  const totalCalls = tools.reduce((sum, tool) => sum + tool.calls, 0);
+  document.getElementById("heatmap-total").textContent = `${formatTokens(totalCalls)} native calls · ${tools.length} tools · ${dates.length} local days`;
 }
 
 function renderTape(summary) {

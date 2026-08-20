@@ -63,6 +63,17 @@ CREATE INDEX IF NOT EXISTS idx_turns_event ON turns(event_key);
 CREATE INDEX IF NOT EXISTS idx_turns_model ON turns(model);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
 CREATE INDEX IF NOT EXISTS idx_sessions_tool ON sessions(tool);
+CREATE TABLE IF NOT EXISTS tool_calls (
+    session_id TEXT NOT NULL REFERENCES sessions(public_id) ON DELETE CASCADE,
+    event_key TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    occurred_at TEXT,
+    token_count INTEGER,
+    token_precision TEXT NOT NULL CHECK(token_precision IN ('native', 'estimated', 'unknown')),
+    PRIMARY KEY (session_id, event_key)
+);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_event ON tool_calls(event_key);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_occurred ON tool_calls(occurred_at);
 CREATE TABLE IF NOT EXISTS scan_roots (
     adapter TEXT NOT NULL,
     root_key TEXT NOT NULL,
@@ -107,6 +118,7 @@ def _remove_legacy_database(path: Path) -> None:
             or "adapter" not in columns
             or "tool" not in session_columns
             or "event_key" not in turn_columns
+            or not probe.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_calls'").fetchone()
         )
     finally:
         probe.close()
@@ -218,6 +230,15 @@ class Store:
                     for turn in session.turns
                 ],
             )
+            self.connection.executemany(
+                """INSERT INTO tool_calls(session_id, event_key, tool_name, occurred_at, token_count, token_precision)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                [
+                    (session.public_id, call.event_key, call.name, call.occurred_at,
+                     call.token_count, call.token_precision)
+                    for call in session.tool_calls
+                ],
+            )
 
     def mark_source_error(
         self, adapter: str, version: int, root: Path, path: Path, stat: Any
@@ -273,6 +294,7 @@ class Store:
         ).fetchone()
         sessions = self.connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         turns = self.connection.execute("SELECT COUNT(DISTINCT event_key) FROM turns").fetchone()[0]
+        calls = self.connection.execute("SELECT COUNT(DISTINCT event_key) FROM tool_calls").fetchone()[0]
         tool_rows = self.connection.execute(
             """SELECT adapter, status, discovered, failed, scanned_at
                FROM scan_roots ORDER BY adapter"""
@@ -282,6 +304,7 @@ class Store:
             "failed_sources": row["failed"] or 0,
             "sessions": sessions,
             "turns": turns,
+            "tool_calls": calls,
             "last_scan": row["last_scan"],
             "tools": [dict(item) for item in tool_rows],
             "storage": "numeric usage metadata only",
@@ -305,6 +328,33 @@ class Store:
             if existing is None or row_total > existing_total:
                 deduplicated[row["event_key"]] = row
         return list(deduplicated.values())
+
+    def _tool_call_rows(self, earliest: datetime) -> list[sqlite3.Row]:
+        rows = self.connection.execute(
+            """SELECT c.*, s.tool FROM tool_calls c JOIN sessions s ON s.public_id=c.session_id
+               WHERE c.occurred_at >= ? ORDER BY c.occurred_at ASC""",
+            (earliest.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),),
+        ).fetchall()
+        # A client may persist a transcript in more than one root. The native call
+        # id hash survives that duplication, so retain a single event without raw ids.
+        return list({row["event_key"]: row for row in rows}.values())
+
+    @staticmethod
+    def _aggregate_calls(rows: Iterable[sqlite3.Row]) -> dict[str, Any]:
+        rows = list(rows)
+        native = sum(row["token_count"] or 0 for row in rows if row["token_precision"] == "native")
+        estimated = sum(row["token_count"] or 0 for row in rows if row["token_precision"] == "estimated")
+        return {
+            "calls": len(rows),
+            "native_tokens": native,
+            "estimated_tokens": estimated,
+            "unknown_token_calls": sum(row["token_precision"] == "unknown" for row in rows),
+            "token_precision": (
+                "native" if rows and all(row["token_precision"] == "native" for row in rows)
+                else "estimated" if rows and all(row["token_precision"] in {"native", "estimated"} for row in rows)
+                else "unknown"
+            ),
+        }
 
     @staticmethod
     def _aggregate(rows: Iterable[sqlite3.Row]) -> dict[str, Any]:
@@ -362,6 +412,11 @@ class Store:
             "30d": self._aggregate(row for row in rows if in_window(row, 30)),
         }
         filtered = [row for row in rows if in_window(row, days)]
+        calls = self._tool_call_rows(earliest)
+        filtered_calls = [
+            row for row in calls
+            if (stamp := _parse_time(row["occurred_at"])) and stamp.astimezone() >= today - timedelta(days=days - 1)
+        ]
 
         dates = [
             (today - timedelta(days=offset)).date().isoformat()
@@ -432,6 +487,33 @@ class Store:
             )
         tool_rows.sort(key=lambda item: item["total_tokens"], reverse=True)
 
+        call_date_groups: dict[tuple[str, str], list[sqlite3.Row]] = defaultdict(list)
+        for row in filtered_calls:
+            stamp = _parse_time(row["occurred_at"])
+            if stamp:
+                call_date_groups[(row["tool_name"], stamp.astimezone().date().isoformat())].append(row)
+        call_groups: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        for row in filtered_calls:
+            call_groups[row["tool_name"]].append(row)
+        range_calls = self._aggregate_calls(filtered_calls)
+        max_calls = 0
+        native_tool_rows = []
+        for name, group in call_groups.items():
+            summary = self._aggregate_calls(group)
+            cells = []
+            for date in dates:
+                cell = self._aggregate_calls(call_date_groups.get((name, date), []))
+                max_calls = max(max_calls, cell["calls"])
+                cells.append({"date": date, **cell, "status": "known"})
+            native_tool_rows.append({
+                "key": hashlib.sha256(name.encode("utf-8")).hexdigest()[:12],
+                "label": name,
+                "share": summary["calls"] / range_calls["calls"] if range_calls["calls"] else 0,
+                "cells": cells,
+                **summary,
+            })
+        native_tool_rows.sort(key=lambda item: (-item["calls"], item["label"].lower()))
+
         def rank(key: str, limit: int = 10) -> list[dict[str, Any]]:
             groups: dict[str, list[sqlite3.Row]] = defaultdict(list)
             for row in filtered:
@@ -468,21 +550,22 @@ class Store:
             "range": range_summary,
             "heatmap": {
                 "dates": dates,
-                "max_tokens": max_cell,
+                "max_calls": max_calls,
                 "scale": "shared_log_absolute",
-                "tools": tool_rows,
+                "tools": native_tool_rows,
             },
             "rankings": {
-                "tools": tool_rows,
+                "native_tools": native_tool_rows,
+                "clients": tool_rows,
                 "models": rank("model"),
                 "projects": rank("project"),
                 "sessions": session_rank[:20],
             },
             "provenance": {
-                "adapters": "Codex and Claude Code; tool identity comes from the native log adapter, never model name",
-                "source": "Codex native token_count snapshots; Claude Code native assistant usage metadata",
-                "precision": "Codex snapshot deltas with native reset fallback; Claude per-message native usage deduplicated by message identity",
-                "privacy": "no prompt, response, code, tool, or log text stored or returned",
+                "adapters": "Native call names from Codex response items and Claude Code tool-use blocks; client and project are secondary dimensions",
+                "source": "Call identity/name/timestamp only; Codex token snapshots and Claude message usage remain session-level",
+                "precision": "Per-tool tokens are native only when a log directly attributes them; estimated only when a local tokenizer is explicitly used; otherwise unknown. This build does not distribute turn tokens to calls.",
+                "privacy": "no prompt, response, code, tool arguments, tool results, paths, or log text stored or returned",
                 "dimensions": "Claude input includes uncached, cache creation, and cache read; Claude reasoning is unavailable and remains unknown",
                 "cost": "estimated only where the local price table has an exact model entry",
             },

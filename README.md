@@ -1,9 +1,10 @@
 # Agent Token Dashboard
 
-A local-only dashboard for native Agent client token usage. It reads Codex and
-Claude Code JSONL sessions without modifying them, stores only numeric usage
-metadata in SQLite, and never exposes prompt, response, code, tool output, or
-log text in the UI.
+A local-only dashboard for native Agent client token usage and tool-call
+activity. It reads Codex and Claude Code JSONL sessions without modifying them,
+stores only numeric usage metadata plus native tool names/timestamps in SQLite,
+and never exposes prompt, response, code, tool arguments, tool results, or log
+text in the UI.
 
 ## Start
 
@@ -67,19 +68,22 @@ native output counter. Claude Code does not expose a native reasoning-token
 counter in these logs, so reasoning remains unknown rather than zero.
 
 Stored fields are limited to timestamps, model, the final path component of
-the working directory (project label), a hashed source/session identifier,
-numeric usage counters, parse health, and estimated cost. Raw conversation and
-tool content is neither stored nor returned by the HTTP API.
+the working directory (project label), hashed source/session/call identifiers,
+native tool names, numeric usage counters, parse health, and estimated cost.
+Raw conversation and tool arguments/results are neither stored nor returned by
+the HTTP API.
 
 `input_tokens` includes cached input in current Codex logs. Dashboard "total
 tokens” is therefore input plus output; cache and reasoning are displayed as
 subsets and are not added again. Reasoning tokens are already included in
 output tokens for pricing.
 
-The primary heatmap uses Agent clients as rows and every local day in the
-selected 7/30/90-day range as columns. A cell is the tool-day sum of input plus
-output tokens. All visible cells share one absolute logarithmic intensity
-scale; a known zero is distinct from an unavailable source.
+The primary heatmap uses individual native tool names as rows and every local
+day in the selected 7/30/90-day range as columns. A cell is the deduplicated
+native call count for that tool-day. It shows each tool's total calls, share of
+calls, and its token attribution. Agent clients and projects are secondary
+drilldowns, never the default heatmap grouping. All visible cells share one
+absolute logarithmic intensity scale.
 
 ## Pricing and precision
 
@@ -93,6 +97,19 @@ unknown instead of inheriting a guessed rate.
 Long-context rates are selected per native usage delta when its input exceeds
 the configured threshold. Cache writes, cached input, uncached input, and
 output are priced separately when a model supplies those rates.
+
+## Tool-call token precision
+
+Call count and tool name come directly from native Codex `response_item`
+function/custom-tool calls and Claude Code `tool_use` blocks. Duplicate
+transcripts are removed only when a hashed native call identity is present;
+calls missing such an ID remain distinct within their source session. A tool's token value
+is labelled `native` only when the source directly attributes tokens to that
+individual call. It is labelled `estimated` only when a local tokenizer has
+explicitly estimated tool arguments/results. Otherwise it is `unknown`.
+Current native Codex and Claude Code logs supply session/turn usage but no
+per-call attribution, so this dashboard deliberately reports tool tokens as
+unknown and never splits message or turn tokens across calls.
 
 ## Tests
 

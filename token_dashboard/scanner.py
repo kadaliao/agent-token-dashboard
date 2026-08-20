@@ -93,6 +93,17 @@ class Turn:
             self.cost = float(self.cost or 0) + result.value
 
 
+@dataclass(frozen=True)
+class ToolCall:
+    """A native call identity and name only; arguments and results are never retained."""
+
+    event_key: str
+    name: str
+    occurred_at: str | None
+    token_count: int | None = None
+    token_precision: str = "unknown"
+
+
 @dataclass
 class ParsedSession:
     public_id: str
@@ -102,6 +113,7 @@ class ParsedSession:
     started_at: str | None
     ended_at: str | None
     turns: list[Turn]
+    tool_calls: list[ToolCall]
     parse_errors: int
     precision: str
 
@@ -118,6 +130,8 @@ def parse_codex_file(path: Path, pricing: PricingTable) -> ParsedSession:
     parse_errors = 0
     reset_recoveries = 0
     unattributed_index = 0
+    tool_calls: OrderedDict[str, ToolCall] = OrderedDict()
+    call_ordinal = 0
 
     def ensure_turn(turn_id: str, started_at: str | None = None) -> Turn:
         if turn_id not in turns:
@@ -165,6 +179,22 @@ def parse_codex_file(path: Path, pricing: PricingTable) -> ParsedSession:
                         session_model = payload["model"]
                     if payload.get("cwd"):
                         project = _project_label(payload.get("cwd"))
+                continue
+
+            # Native response items identify calls but do not assign token usage
+            # to an individual call. Deliberately do not inspect arguments/output.
+            if record_type == "response_item":
+                call_type = payload.get("type")
+                name = payload.get("name")
+                if call_type in {"function_call", "custom_tool_call"} and isinstance(name, str) and name:
+                    call_ordinal += 1
+                    native_id = payload.get("call_id") or payload.get("id")
+                    # Only a native id is safe to deduplicate across transcripts.
+                    # Timestamp/name collisions without it are distinct calls.
+                    identity = native_id if isinstance(native_id, str) and native_id else f"{public_id}:{call_ordinal}"
+                    prefix = "codex-call-id" if isinstance(native_id, str) and native_id else "codex-call-local"
+                    event_key = hashlib.sha256(f"{prefix}:{identity}".encode("utf-8")).hexdigest()
+                    tool_calls[event_key] = ToolCall(event_key, name, stamp)
                 continue
 
             if record_type != "event_msg":
@@ -231,6 +261,7 @@ def parse_codex_file(path: Path, pricing: PricingTable) -> ParsedSession:
         started_at=first_timestamp,
         ended_at=last_timestamp,
         turns=parsed_turns,
+        tool_calls=list(tool_calls.values()),
         parse_errors=parse_errors,
         precision="native_delta_with_resets" if reset_recoveries else "native_delta",
     )
@@ -251,6 +282,8 @@ def parse_claude_file(path: Path, pricing: PricingTable) -> ParsedSession:
     last_timestamp: str | None = None
     turns: OrderedDict[str, Turn] = OrderedDict()
     parse_errors = 0
+    tool_calls: OrderedDict[str, ToolCall] = OrderedDict()
+    call_ordinal = 0
 
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
@@ -264,9 +297,25 @@ def parse_claude_file(path: Path, pricing: PricingTable) -> ParsedSession:
 
             if record.get("cwd"):
                 project = _project_label(record.get("cwd"))
+            # Read only content-block type/name/id, never text, inputs, or results.
+            message = record.get("message") if isinstance(record.get("message"), dict) else {}
+            content = message.get("content")
+            if record.get("type") == "assistant" and isinstance(content, list):
+                stamp = _timestamp(record.get("timestamp"))
+                for index, block in enumerate(content):
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    name = block.get("name")
+                    if not isinstance(name, str) or not name:
+                        continue
+                    call_ordinal += 1
+                    native_id = block.get("id")
+                    identity = native_id if isinstance(native_id, str) and native_id else f"{public_id}:{call_ordinal}"
+                    prefix = "claude-call-id" if isinstance(native_id, str) and native_id else "claude-call-local"
+                    event_key = hashlib.sha256(f"{prefix}:{identity}".encode("utf-8")).hexdigest()
+                    tool_calls[event_key] = ToolCall(event_key, name, stamp)
             if record.get("type") != "assistant":
                 continue
-            message = record.get("message") if isinstance(record.get("message"), dict) else {}
             raw_usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
             if raw_usage is None:
                 continue
@@ -343,6 +392,7 @@ def parse_claude_file(path: Path, pricing: PricingTable) -> ParsedSession:
         started_at=first_timestamp,
         ended_at=last_timestamp,
         turns=list(turns.values()),
+        tool_calls=list(tool_calls.values()),
         parse_errors=parse_errors,
         precision="native_message_usage",
     )
@@ -364,6 +414,6 @@ class Adapter:
 
 
 ADAPTERS = {
-    "codex": Adapter("codex", "Codex", 5, find_codex_logs, parse_codex_file),
-    "claude": Adapter("claude", "Claude Code", 2, find_claude_logs, parse_claude_file),
+    "codex": Adapter("codex", "Codex", 6, find_codex_logs, parse_codex_file),
+    "claude": Adapter("claude", "Claude Code", 3, find_claude_logs, parse_claude_file),
 }

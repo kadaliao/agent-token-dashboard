@@ -26,8 +26,8 @@
     <section class="heatmap-band" aria-labelledby="heatmap-title">
       <div class="section-heading heatmap-heading">
         <div>
-          <p class="kicker">Tool x local day</p>
-          <h2 id="heatmap-title">Where agent tokens went</h2>
+          <p class="kicker">Native tool call x local day</p>
+          <h2 id="heatmap-title">Tool call activity</h2>
           <p id="heatmap-total" class="section-total"></p>
         </div>
         <div class="segmented" aria-label="Reporting range">
@@ -39,7 +39,7 @@
       <div class="heatmap-legend" aria-label="Heatmap legend">
         <span class="legend-label">Shared absolute log scale</span>
         <span class="legend-gradient" aria-hidden="true"></span>
-        <span>0</span><span id="legend-max">--</span>
+        <span>0</span><span id="legend-max">-- calls</span>
         <span class="legend-zero" aria-hidden="true"></span><span>Zero</span>
         <span class="legend-unknown" aria-hidden="true"></span><span>Unavailable</span>
       </div>
@@ -68,7 +68,7 @@
 
     <section class="ledger-band tape-band" aria-labelledby="tape-title">
       <div class="section-heading compact">
-        <div><p class="kicker">Native dimensions</p><h2 id="tape-title">Selected range</h2></div>
+        <div><p class="kicker">Session-level dimensions</p><h2 id="tape-title">Selected range</h2></div>
       </div>
       <div id="token-tape" class="token-tape"></div>
       <div id="dimension-grid" class="dimension-grid"></div>
