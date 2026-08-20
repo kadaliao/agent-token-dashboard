@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from token_dashboard.pricing import PricingTable
-from token_dashboard.scanner import parse_codex_file
+from token_dashboard.scanner import parse_claude_file, parse_codex_file
 
 
 def record(type_, payload, timestamp="2026-08-20T01:00:00Z"):
@@ -76,6 +76,41 @@ class ScannerTests(unittest.TestCase):
         turn = parse_codex_file(path, self.pricing).turns[0]
         self.assertFalse(turn.available["reasoning_output_tokens"])
         self.assertEqual(turn.usage["reasoning_output_tokens"], 0)
+
+    def test_claude_native_usage_is_deduplicated_and_reasoning_stays_unknown(self):
+        message = {
+            "id": "message-native-id",
+            "model": "claude-test",
+            "role": "assistant",
+            "content": "PRIVATE_RESPONSE_MUST_NOT_BE_PARSED",
+            "usage": {
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 3,
+                "cache_read_input_tokens": 5,
+                "output_tokens": 7,
+            },
+        }
+        entry = {
+            "type": "assistant",
+            "timestamp": "2026-08-20T02:00:00Z",
+            "cwd": "/private/code/claude-project",
+            "uuid": "record-native-id",
+            "message": message,
+        }
+        updated = json.loads(json.dumps(entry))
+        updated["message"]["usage"]["output_tokens"] = 11
+        path = self.write_log([entry, updated])
+        parsed = parse_claude_file(path, self.pricing)
+        self.assertEqual(parsed.tool, "Claude Code")
+        self.assertEqual(parsed.project, "claude-project")
+        self.assertEqual(len(parsed.turns), 1)
+        turn = parsed.turns[0]
+        self.assertEqual(turn.usage["input_tokens"], 10)
+        self.assertEqual(turn.usage["cached_input_tokens"], 5)
+        self.assertEqual(turn.usage["cache_write_input_tokens"], 3)
+        self.assertEqual(turn.usage["output_tokens"], 11)
+        self.assertFalse(turn.available["reasoning_output_tokens"])
+        self.assertEqual(turn.precision, "native_message_usage")
 
 
 if __name__ == "__main__":

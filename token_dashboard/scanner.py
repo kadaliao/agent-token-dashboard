@@ -7,7 +7,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .pricing import PricingTable
 
@@ -18,7 +18,6 @@ COUNTERS = (
     "output_tokens",
     "reasoning_output_tokens",
 )
-ADAPTER_VERSION = 4
 
 
 def _timestamp(value: Any) -> str | None:
@@ -55,6 +54,7 @@ def _usage(raw: Any) -> tuple[dict[str, int], dict[str, bool]]:
 class Turn:
     turn_id: str
     sequence: int
+    event_key: str
     started_at: str | None = None
     ended_at: str | None = None
     model: str | None = None
@@ -96,7 +96,7 @@ class Turn:
 @dataclass
 class ParsedSession:
     public_id: str
-    agent: str
+    tool: str
     project: str
     model: str | None
     started_at: str | None
@@ -107,7 +107,7 @@ class ParsedSession:
 
 
 def parse_codex_file(path: Path, pricing: PricingTable) -> ParsedSession:
-    public_id = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:20]
+    public_id = hashlib.sha256(f"codex:{path}".encode("utf-8")).hexdigest()[:20]
     project = "Unknown project"
     session_model: str | None = None
     first_timestamp: str | None = None
@@ -121,7 +121,15 @@ def parse_codex_file(path: Path, pricing: PricingTable) -> ParsedSession:
 
     def ensure_turn(turn_id: str, started_at: str | None = None) -> Turn:
         if turn_id not in turns:
-            turns[turn_id] = Turn(turn_id=turn_id, sequence=len(turns) + 1, started_at=started_at)
+            event_key = hashlib.sha256(
+                f"codex:{public_id}:{turn_id}".encode("utf-8")
+            ).hexdigest()
+            turns[turn_id] = Turn(
+                turn_id=event_key[:20],
+                sequence=len(turns) + 1,
+                event_key=event_key,
+                started_at=started_at,
+            )
         elif started_at and turns[turn_id].started_at is None:
             turns[turn_id].started_at = started_at
         return turns[turn_id]
@@ -217,7 +225,7 @@ def parse_codex_file(path: Path, pricing: PricingTable) -> ParsedSession:
 
     return ParsedSession(
         public_id=public_id,
-        agent="Codex",
+        tool="Codex",
         project=project,
         model=session_model,
         started_at=first_timestamp,
@@ -232,3 +240,130 @@ def find_codex_logs(root: Path) -> Iterable[Path]:
     if not root.exists():
         return []
     return root.rglob("*.jsonl")
+
+
+def parse_claude_file(path: Path, pricing: PricingTable) -> ParsedSession:
+    """Parse Claude Code assistant usage without reading message content."""
+    public_id = hashlib.sha256(f"claude:{path}".encode("utf-8")).hexdigest()[:20]
+    project = "Unknown project"
+    session_model: str | None = None
+    first_timestamp: str | None = None
+    last_timestamp: str | None = None
+    turns: OrderedDict[str, Turn] = OrderedDict()
+    parse_errors = 0
+
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, UnicodeError):
+                parse_errors += 1
+                continue
+            if not isinstance(record, dict):
+                continue
+
+            if record.get("cwd"):
+                project = _project_label(record.get("cwd"))
+            if record.get("type") != "assistant":
+                continue
+            message = record.get("message") if isinstance(record.get("message"), dict) else {}
+            raw_usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
+            if raw_usage is None:
+                continue
+
+            native_id = message.get("id") or record.get("uuid")
+            if isinstance(native_id, str) and native_id:
+                message_key = native_id
+            else:
+                identity = {
+                    "timestamp": record.get("timestamp"),
+                    "model": message.get("model"),
+                    "usage": {key: raw_usage.get(key) for key in (
+                        "input_tokens", "cache_creation_input_tokens",
+                        "cache_read_input_tokens", "output_tokens",
+                    )},
+                }
+                message_key = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+            def native_counter(key: str) -> tuple[int, bool]:
+                value = raw_usage.get(key)
+                available = isinstance(value, (int, float)) and not isinstance(value, bool)
+                return (max(int(value), 0) if available else 0, available)
+
+            uncached, uncached_available = native_counter("input_tokens")
+            cache_write, cache_write_available = native_counter("cache_creation_input_tokens")
+            cache_read, cache_read_available = native_counter("cache_read_input_tokens")
+            output, output_available = native_counter("output_tokens")
+            input_available = uncached_available and cache_write_available and cache_read_available
+            values = {
+                "input_tokens": uncached + cache_write + cache_read,
+                "cached_input_tokens": cache_read,
+                "cache_write_input_tokens": cache_write,
+                "output_tokens": output,
+                "reasoning_output_tokens": 0,
+            }
+            available = {
+                "input_tokens": input_available,
+                "cached_input_tokens": cache_read_available,
+                "cache_write_input_tokens": cache_write_available,
+                "output_tokens": output_available,
+                "reasoning_output_tokens": False,
+            }
+            if not any(available.values()):
+                continue
+
+            stamp = _timestamp(record.get("timestamp"))
+            if stamp:
+                first_timestamp = first_timestamp or stamp
+                last_timestamp = stamp
+            model = message.get("model") if isinstance(message.get("model"), str) else None
+            session_model = model or session_model
+            event_key = hashlib.sha256(f"claude:{message_key}".encode("utf-8")).hexdigest()
+            turn_id = hashlib.sha256(
+                f"{public_id}:{message_key}".encode("utf-8")
+            ).hexdigest()[:20]
+            sequence = turns[message_key].sequence if message_key in turns else len(turns) + 1
+            turn = Turn(
+                turn_id=turn_id,
+                sequence=sequence,
+                event_key=event_key,
+                started_at=stamp,
+                ended_at=stamp,
+                model=model,
+                precision="native_message_usage",
+            )
+            turn.add_usage(values, available, "native_message_usage")
+            turn.estimate_cost(pricing)
+            turns[message_key] = turn
+
+    return ParsedSession(
+        public_id=public_id,
+        tool="Claude Code",
+        project=project,
+        model=session_model,
+        started_at=first_timestamp,
+        ended_at=last_timestamp,
+        turns=list(turns.values()),
+        parse_errors=parse_errors,
+        precision="native_message_usage",
+    )
+
+
+def find_claude_logs(root: Path) -> Iterable[Path]:
+    if not root.exists():
+        return []
+    return root.rglob("*.jsonl")
+
+
+@dataclass(frozen=True)
+class Adapter:
+    key: str
+    label: str
+    version: int
+    discover: Callable[[Path], Iterable[Path]]
+    parse: Callable[[Path, PricingTable], ParsedSession]
+
+
+ADAPTERS = {
+    "codex": Adapter("codex", "Codex", 5, find_codex_logs, parse_codex_file),
+    "claude": Adapter("claude", "Claude Code", 2, find_claude_logs, parse_claude_file),
+}

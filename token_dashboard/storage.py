@@ -7,13 +7,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .scanner import ADAPTER_VERSION, COUNTERS, ParsedSession
+from .scanner import COUNTERS, ParsedSession
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS sources (
     source_key TEXT PRIMARY KEY,
+    adapter TEXT NOT NULL,
     root_key TEXT NOT NULL,
     size INTEGER NOT NULL,
     mtime_ns INTEGER NOT NULL,
@@ -25,7 +26,7 @@ CREATE TABLE IF NOT EXISTS sources (
 CREATE TABLE IF NOT EXISTS sessions (
     public_id TEXT PRIMARY KEY,
     source_key TEXT NOT NULL UNIQUE REFERENCES sources(source_key) ON DELETE CASCADE,
-    agent TEXT NOT NULL,
+    tool TEXT NOT NULL,
     project TEXT NOT NULL,
     model TEXT,
     started_at TEXT,
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS turns (
     session_id TEXT NOT NULL REFERENCES sessions(public_id) ON DELETE CASCADE,
     turn_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
+    event_key TEXT NOT NULL,
     started_at TEXT,
     ended_at TEXT,
     model TEXT,
@@ -57,8 +59,20 @@ CREATE TABLE IF NOT EXISTS turns (
     PRIMARY KEY (session_id, turn_id)
 );
 CREATE INDEX IF NOT EXISTS idx_turns_started ON turns(started_at);
+CREATE INDEX IF NOT EXISTS idx_turns_event ON turns(event_key);
 CREATE INDEX IF NOT EXISTS idx_turns_model ON turns(model);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
+CREATE INDEX IF NOT EXISTS idx_sessions_tool ON sessions(tool);
+CREATE TABLE IF NOT EXISTS scan_roots (
+    adapter TEXT NOT NULL,
+    root_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    discovered INTEGER NOT NULL,
+    failed INTEGER NOT NULL,
+    adapter_version INTEGER NOT NULL,
+    scanned_at TEXT NOT NULL,
+    PRIMARY KEY (adapter, root_key)
+);
 """
 
 
@@ -66,12 +80,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def source_key(path: Path) -> str:
-    return hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()
+def source_key(adapter: str, path: Path) -> str:
+    return hashlib.sha256(f"{adapter}:{path.resolve()}".encode("utf-8")).hexdigest()
 
 
-def root_key(path: Path) -> str:
-    return hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()
+def root_key(adapter: str, path: Path) -> str:
+    return hashlib.sha256(f"{adapter}:{path.resolve()}".encode("utf-8")).hexdigest()
 
 
 def _remove_legacy_database(path: Path) -> None:
@@ -85,7 +99,15 @@ def _remove_legacy_database(path: Path) -> None:
         if not exists:
             return
         columns = {row[1] for row in probe.execute("PRAGMA table_info(sources)")}
-        legacy = "path" in columns or "root" in columns
+        session_columns = {row[1] for row in probe.execute("PRAGMA table_info(sessions)")}
+        turn_columns = {row[1] for row in probe.execute("PRAGMA table_info(turns)")}
+        legacy = (
+            "path" in columns
+            or "root" in columns
+            or "adapter" not in columns
+            or "tool" not in session_columns
+            or "event_key" not in turn_columns
+        )
     finally:
         probe.close()
     if not legacy:
@@ -113,16 +135,14 @@ class Store:
         self.connection = sqlite3.connect(path, timeout=30, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.connection.executescript(SCHEMA)
-        source_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(sources)")}
-        if "adapter_version" not in source_columns:
-            with self.connection:
-                self.connection.execute("ALTER TABLE sources ADD COLUMN adapter_version INTEGER NOT NULL DEFAULT 1")
 
     def close(self) -> None:
         self.connection.close()
 
-    def source_unchanged(self, path: Path, size: int, mtime_ns: int) -> bool:
-        key = source_key(path)
+    def source_unchanged(
+        self, adapter: str, version: int, path: Path, size: int, mtime_ns: int
+    ) -> bool:
+        key = source_key(adapter, path)
         row = self.connection.execute(
             "SELECT size, mtime_ns, status, adapter_version FROM sources WHERE source_key = ?", (key,)
         ).fetchone()
@@ -131,30 +151,32 @@ class Store:
             and row["status"] == "ok"
             and row["size"] == size
             and row["mtime_ns"] == mtime_ns
-            and row["adapter_version"] == ADAPTER_VERSION
+            and row["adapter_version"] == version
         )
 
-    def replace_source(self, root: Path, path: Path, stat: Any, session: ParsedSession) -> None:
-        source_hash = source_key(path)
-        root_hash = root_key(root)
+    def replace_source(
+        self, adapter: str, version: int, root: Path, path: Path, stat: Any, session: ParsedSession
+    ) -> None:
+        source_hash = source_key(adapter, path)
+        root_hash = root_key(adapter, root)
         with self.connection:
             self.connection.execute(
-                """INSERT INTO sources(source_key, root_key, size, mtime_ns, status, parse_errors, adapter_version, scanned_at)
-                   VALUES (?, ?, ?, ?, 'ok', ?, ?, ?)
-                   ON CONFLICT(source_key) DO UPDATE SET root_key=excluded.root_key, size=excluded.size,
+                """INSERT INTO sources(source_key, adapter, root_key, size, mtime_ns, status, parse_errors, adapter_version, scanned_at)
+                   VALUES (?, ?, ?, ?, ?, 'ok', ?, ?, ?)
+                   ON CONFLICT(source_key) DO UPDATE SET adapter=excluded.adapter, root_key=excluded.root_key, size=excluded.size,
                    mtime_ns=excluded.mtime_ns, status='ok', parse_errors=excluded.parse_errors,
                    adapter_version=excluded.adapter_version, scanned_at=excluded.scanned_at""",
-                (source_hash, root_hash, stat.st_size, stat.st_mtime_ns, session.parse_errors, ADAPTER_VERSION, _now()),
+                (source_hash, adapter, root_hash, stat.st_size, stat.st_mtime_ns, session.parse_errors, version, _now()),
             )
             self.connection.execute("DELETE FROM sessions WHERE source_key = ?", (source_hash,))
             self.connection.execute(
-                """INSERT INTO sessions(public_id, source_key, agent, project, model,
+                """INSERT INTO sessions(public_id, source_key, tool, project, model,
                    started_at, ended_at, parse_errors, precision)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session.public_id,
                     source_hash,
-                    session.agent,
+                    session.tool,
                     session.project,
                     session.model,
                     session.started_at,
@@ -164,16 +186,17 @@ class Store:
                 ),
             )
             self.connection.executemany(
-                """INSERT INTO turns(session_id, turn_id, sequence, started_at, ended_at, model,
+                """INSERT INTO turns(session_id, turn_id, sequence, event_key, started_at, ended_at, model,
                    input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens,
                    reasoning_output_tokens, input_available, cache_available, cache_write_available,
                    output_available, reasoning_available, estimated_cost, pricing_known, cost_reason,
-                   precision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   precision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     (
                         session.public_id,
                         turn.turn_id,
                         turn.sequence,
+                        turn.event_key,
                         turn.started_at,
                         turn.ended_at,
                         turn.model,
@@ -196,22 +219,25 @@ class Store:
                 ],
             )
 
-    def mark_source_error(self, root: Path, path: Path, stat: Any) -> None:
-        source_hash = source_key(path)
-        root_hash = root_key(root)
+    def mark_source_error(
+        self, adapter: str, version: int, root: Path, path: Path, stat: Any
+    ) -> None:
+        source_hash = source_key(adapter, path)
+        root_hash = root_key(adapter, root)
         with self.connection:
             self.connection.execute(
-                """INSERT INTO sources(source_key, root_key, size, mtime_ns, status, parse_errors, adapter_version, scanned_at)
-                   VALUES (?, ?, ?, ?, 'error', 1, ?, ?)
-                   ON CONFLICT(source_key) DO UPDATE SET root_key=excluded.root_key,
+                """INSERT INTO sources(source_key, adapter, root_key, size, mtime_ns, status, parse_errors, adapter_version, scanned_at)
+                   VALUES (?, ?, ?, ?, ?, 'error', 1, ?, ?)
+                   ON CONFLICT(source_key) DO UPDATE SET adapter=excluded.adapter, root_key=excluded.root_key,
                    size=excluded.size, mtime_ns=excluded.mtime_ns,
                    status='error', adapter_version=excluded.adapter_version, scanned_at=excluded.scanned_at""",
-                (source_hash, root_hash, stat.st_size, stat.st_mtime_ns, ADAPTER_VERSION, _now()),
+                (source_hash, adapter, root_hash, stat.st_size, stat.st_mtime_ns, version, _now()),
             )
 
-    def remove_missing(self, root: Path, present: set[str]) -> int:
+    def remove_missing(self, adapter: str, root: Path, present: set[str]) -> int:
         rows = self.connection.execute(
-            "SELECT source_key FROM sources WHERE root_key = ?", (root_key(root),)
+            "SELECT source_key FROM sources WHERE adapter = ? AND root_key = ?",
+            (adapter, root_key(adapter, root)),
         ).fetchall()
         missing = [row["source_key"] for row in rows if row["source_key"] not in present]
         with self.connection:
@@ -220,6 +246,25 @@ class Store:
             )
         return len(missing)
 
+    def record_root_scan(
+        self,
+        adapter: str,
+        version: int,
+        root: Path,
+        status: str,
+        discovered: int,
+        failed: int,
+    ) -> None:
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO scan_roots(adapter, root_key, status, discovered, failed, adapter_version, scanned_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(adapter, root_key) DO UPDATE SET status=excluded.status,
+                   discovered=excluded.discovered, failed=excluded.failed,
+                   adapter_version=excluded.adapter_version, scanned_at=excluded.scanned_at""",
+                (adapter, root_key(adapter, root), status, discovered, failed, version, _now()),
+            )
+
     def status(self) -> dict[str, Any]:
         row = self.connection.execute(
             """SELECT COUNT(*) AS sources,
@@ -227,25 +272,39 @@ class Store:
                MAX(scanned_at) AS last_scan FROM sources"""
         ).fetchone()
         sessions = self.connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        turns = self.connection.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+        turns = self.connection.execute("SELECT COUNT(DISTINCT event_key) FROM turns").fetchone()[0]
+        tool_rows = self.connection.execute(
+            """SELECT adapter, status, discovered, failed, scanned_at
+               FROM scan_roots ORDER BY adapter"""
+        ).fetchall()
         return {
             "sources": row["sources"] or 0,
             "failed_sources": row["failed"] or 0,
             "sessions": sessions,
             "turns": turns,
             "last_scan": row["last_scan"],
-            "agent": "Codex",
+            "tools": [dict(item) for item in tool_rows],
             "storage": "numeric usage metadata only",
         }
 
     def _turn_rows(self, earliest: datetime) -> list[sqlite3.Row]:
-        return self.connection.execute(
-            """SELECT t.*, s.project, s.agent, s.public_id, s.parse_errors AS session_parse_errors,
+        rows = self.connection.execute(
+            """SELECT t.*, s.project, s.tool, s.public_id, s.parse_errors AS session_parse_errors,
                s.precision AS session_precision
                FROM turns t JOIN sessions s ON s.public_id=t.session_id
                WHERE t.started_at >= ? ORDER BY t.started_at ASC""",
             (earliest.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),),
         ).fetchall()
+        deduplicated: dict[str, sqlite3.Row] = {}
+        for row in rows:
+            existing = deduplicated.get(row["event_key"])
+            row_total = row["input_tokens"] + row["output_tokens"]
+            existing_total = (
+                existing["input_tokens"] + existing["output_tokens"] if existing else -1
+            )
+            if existing is None or row_total > existing_total:
+                deduplicated[row["event_key"]] = row
+        return list(deduplicated.values())
 
     @staticmethod
     def _aggregate(rows: Iterable[sqlite3.Row]) -> dict[str, Any]:
@@ -304,12 +363,74 @@ class Store:
         }
         filtered = [row for row in rows if in_window(row, days)]
 
-        trend_groups: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        dates = [
+            (today - timedelta(days=offset)).date().isoformat()
+            for offset in range(days - 1, -1, -1)
+        ]
+        tool_date_groups: dict[tuple[str, str], list[sqlite3.Row]] = defaultdict(list)
         for row in filtered:
             stamp = _parse_time(row["started_at"])
             if stamp:
-                trend_groups[stamp.astimezone().date().isoformat()].append(row)
-        trend = [{"date": date, **self._aggregate(group)} for date, group in sorted(trend_groups.items())]
+                tool_date_groups[(row["tool"], stamp.astimezone().date().isoformat())].append(row)
+
+        root_rows = self.connection.execute(
+            "SELECT adapter, status, failed FROM scan_roots"
+        ).fetchall()
+        root_state: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {"ready": False, "failed": False, "missing": False}
+        )
+        labels = {"codex": "Codex", "claude": "Claude Code"}
+        for root in root_rows:
+            state = root_state[root["adapter"]]
+            state["ready"] = state["ready"] or root["status"] == "ready"
+            state["failed"] = state["failed"] or bool(root["failed"])
+            state["missing"] = state["missing"] or root["status"] == "missing"
+        for row in filtered:
+            adapter = "claude" if row["tool"] == "Claude Code" else "codex"
+            root_state.setdefault(adapter, {"ready": True, "failed": False, "missing": False})
+
+        range_summary = self._aggregate(filtered)
+        tool_rows: list[dict[str, Any]] = []
+        max_cell = 0
+        for adapter, availability in sorted(root_state.items()):
+            label = labels.get(adapter, adapter)
+            grouped_rows = [row for row in filtered if row["tool"] == label]
+            aggregate = self._aggregate(grouped_rows)
+            if availability["ready"] and (availability["failed"] or availability["missing"]):
+                availability_label = "partial"
+            elif availability["ready"]:
+                availability_label = "available"
+            else:
+                availability_label = "unavailable"
+            cells = []
+            for date in dates:
+                if availability_label == "unavailable":
+                    cells.append({"date": date, "tokens": None, "status": "unknown"})
+                    continue
+                cell = self._aggregate(tool_date_groups.get((label, date), []))
+                max_cell = max(max_cell, cell["total_tokens"])
+                cells.append(
+                    {
+                        "date": date,
+                        "tokens": cell["total_tokens"],
+                        "status": "partial" if availability_label == "partial" else "known",
+                    }
+                )
+            tool_rows.append(
+                {
+                    "key": adapter,
+                    "label": label,
+                    "availability": availability_label,
+                    "share": (
+                        aggregate["total_tokens"] / range_summary["total_tokens"]
+                        if range_summary["total_tokens"]
+                        else 0
+                    ),
+                    "cells": cells,
+                    **aggregate,
+                }
+            )
+        tool_rows.sort(key=lambda item: item["total_tokens"], reverse=True)
 
         def rank(key: str, limit: int = 10) -> list[dict[str, Any]]:
             groups: dict[str, list[sqlite3.Row]] = defaultdict(list)
@@ -331,6 +452,7 @@ class Store:
                     "id": session_id,
                     "short_id": session_id[:8],
                     "project": group[0]["project"],
+                    "tool": group[0]["tool"],
                     "model": group[-1]["model"] or "Unknown model",
                     "ended_at": latest,
                     **aggregate,
@@ -343,25 +465,32 @@ class Store:
             "timezone": str(now_local.tzinfo),
             "range_days": days,
             "windows": windows,
-            "range": self._aggregate(filtered),
-            "trend": trend,
+            "range": range_summary,
+            "heatmap": {
+                "dates": dates,
+                "max_tokens": max_cell,
+                "scale": "shared_log_absolute",
+                "tools": tool_rows,
+            },
             "rankings": {
+                "tools": tool_rows,
                 "models": rank("model"),
                 "projects": rank("project"),
                 "sessions": session_rank[:20],
             },
             "provenance": {
-                "agent": "Codex",
-                "source": "native event_msg/token_count cumulative snapshots",
-                "precision": "adjacent native snapshot deltas; reset fallback uses native last_token_usage",
+                "adapters": "Codex and Claude Code; tool identity comes from the native log adapter, never model name",
+                "source": "Codex native token_count snapshots; Claude Code native assistant usage metadata",
+                "precision": "Codex snapshot deltas with native reset fallback; Claude per-message native usage deduplicated by message identity",
                 "privacy": "no prompt, response, code, tool, or log text stored or returned",
-                "cost": "estimated from local standard API price table; reasoning is included in output",
+                "dimensions": "Claude input includes uncached, cache creation, and cache read; Claude reasoning is unavailable and remains unknown",
+                "cost": "estimated only where the local price table has an exact model entry",
             },
         }
 
     def session_detail(self, public_id: str) -> dict[str, Any] | None:
         session = self.connection.execute(
-            """SELECT public_id, agent, project, model, started_at, ended_at, parse_errors, precision
+            """SELECT public_id, tool, project, model, started_at, ended_at, parse_errors, precision
                FROM sessions WHERE public_id = ?""",
             (public_id,),
         ).fetchone()
@@ -392,7 +521,7 @@ class Store:
         return {
             "id": session["public_id"],
             "short_id": session["public_id"][:8],
-            "agent": session["agent"],
+            "tool": session["tool"],
             "project": session["project"],
             "model": session["model"] or "Unknown model",
             "started_at": session["started_at"],

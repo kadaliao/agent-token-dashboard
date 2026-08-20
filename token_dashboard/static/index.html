@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="dark">
   <title>Agent Token Ledger</title>
   <link rel="stylesheet" href="/app.css">
 </head>
@@ -11,7 +11,7 @@
   <header class="topbar">
     <div class="brand-block">
       <p class="kicker">Local usage ledger</p>
-      <h1>Agent tokens</h1>
+      <h1>Agent token attribution</h1>
     </div>
     <div class="header-actions">
       <div class="scan-state" aria-live="polite">
@@ -23,32 +23,12 @@
   </header>
 
   <main>
-    <section class="window-grid" aria-label="Usage windows">
-      <article class="metric-card" data-window="today">
-        <div class="metric-heading"><span>Today</span><span class="coverage"></span></div>
-        <strong class="metric-tokens">--</strong>
-        <span class="metric-unit">tokens</span>
-        <div class="metric-cost">Cost unknown</div>
-      </article>
-      <article class="metric-card" data-window="7d">
-        <div class="metric-heading"><span>Last 7 days</span><span class="coverage"></span></div>
-        <strong class="metric-tokens">--</strong>
-        <span class="metric-unit">tokens</span>
-        <div class="metric-cost">Cost unknown</div>
-      </article>
-      <article class="metric-card" data-window="30d">
-        <div class="metric-heading"><span>Last 30 days</span><span class="coverage"></span></div>
-        <strong class="metric-tokens">--</strong>
-        <span class="metric-unit">tokens</span>
-        <div class="metric-cost">Cost unknown</div>
-      </article>
-    </section>
-
-    <section class="ledger-band tape-band" aria-labelledby="tape-title">
-      <div class="section-heading">
+    <section class="heatmap-band" aria-labelledby="heatmap-title">
+      <div class="section-heading heatmap-heading">
         <div>
-          <p class="kicker">Native dimensions</p>
-          <h2 id="tape-title">Token tape</h2>
+          <p class="kicker">Tool x local day</p>
+          <h2 id="heatmap-title">Where agent tokens went</h2>
+          <p id="heatmap-total" class="section-total"></p>
         </div>
         <div class="segmented" aria-label="Reporting range">
           <button type="button" data-days="7">7d</button>
@@ -56,42 +36,66 @@
           <button type="button" data-days="90">90d</button>
         </div>
       </div>
+      <div class="heatmap-legend" aria-label="Heatmap legend">
+        <span class="legend-label">Shared absolute log scale</span>
+        <span class="legend-gradient" aria-hidden="true"></span>
+        <span>0</span><span id="legend-max">--</span>
+        <span class="legend-zero" aria-hidden="true"></span><span>Zero</span>
+        <span class="legend-unknown" aria-hidden="true"></span><span>Unavailable</span>
+      </div>
+      <div class="heatmap-scroll" tabindex="0" aria-label="Tool usage heatmap, horizontally scrollable">
+        <div id="heatmap" class="heatmap" role="grid"></div>
+      </div>
+    </section>
+
+    <section class="window-grid" aria-label="Usage windows">
+      <article class="metric-card" data-window="today">
+        <div class="metric-heading"><span>Today</span><span class="coverage"></span></div>
+        <strong class="metric-tokens">--</strong><span class="metric-unit">tokens</span>
+        <div class="metric-cost">Cost unknown</div>
+      </article>
+      <article class="metric-card" data-window="7d">
+        <div class="metric-heading"><span>Last 7 days</span><span class="coverage"></span></div>
+        <strong class="metric-tokens">--</strong><span class="metric-unit">tokens</span>
+        <div class="metric-cost">Cost unknown</div>
+      </article>
+      <article class="metric-card" data-window="30d">
+        <div class="metric-heading"><span>Last 30 days</span><span class="coverage"></span></div>
+        <strong class="metric-tokens">--</strong><span class="metric-unit">tokens</span>
+        <div class="metric-cost">Cost unknown</div>
+      </article>
+    </section>
+
+    <section class="ledger-band tape-band" aria-labelledby="tape-title">
+      <div class="section-heading compact">
+        <div><p class="kicker">Native dimensions</p><h2 id="tape-title">Selected range</h2></div>
+      </div>
       <div id="token-tape" class="token-tape"></div>
       <div id="dimension-grid" class="dimension-grid"></div>
     </section>
 
     <div class="analysis-grid">
-      <section class="ledger-band" aria-labelledby="trend-title">
-        <div class="section-heading compact">
-          <div><p class="kicker">Daily volume</p><h2 id="trend-title">Token trend</h2></div>
-          <span id="trend-total" class="section-total"></span>
-        </div>
-        <div id="trend-chart" class="chart" role="img" aria-label="Daily token volume"></div>
-      </section>
-
       <section class="ledger-band" aria-labelledby="model-title">
         <div class="section-heading compact">
-          <div><p class="kicker">Workload mix</p><h2 id="model-title">Models</h2></div>
+          <div><p class="kicker">Secondary drilldown</p><h2 id="model-title">Models</h2></div>
         </div>
         <div id="model-ranking" class="ranking-list"></div>
       </section>
+      <section class="ledger-band" aria-labelledby="project-title">
+        <div class="section-heading compact">
+          <div><p class="kicker">Secondary drilldown</p><h2 id="project-title">Projects</h2></div>
+        </div>
+        <div id="project-ranking" class="ranking-list"></div>
+      </section>
     </div>
-
-    <section class="ledger-band" aria-labelledby="project-title">
-      <div class="section-heading compact">
-        <div><p class="kicker">Working directories</p><h2 id="project-title">Projects</h2></div>
-      </div>
-      <div id="project-ranking" class="project-grid"></div>
-    </section>
 
     <section class="ledger-band sessions-band" aria-labelledby="session-title">
       <div class="section-heading compact">
-        <div><p class="kicker">Largest traces</p><h2 id="session-title">Sessions</h2></div>
-        <span class="section-total">Select a row for per-turn deltas</span>
+        <div><p class="kicker">Per-turn drilldown</p><h2 id="session-title">Sessions</h2></div>
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Session</th><th>Project</th><th>Model</th><th>Turns</th><th>Tokens</th><th>Estimated cost</th><th>Last activity</th></tr></thead>
+          <thead><tr><th>Session</th><th>Tool</th><th>Project</th><th>Model</th><th>Turns</th><th>Tokens</th><th>Estimated cost</th><th>Last activity</th></tr></thead>
           <tbody id="session-table"></tbody>
         </table>
       </div>
@@ -112,7 +116,7 @@
       <div id="session-summary" class="dialog-summary"></div>
       <div class="table-scroll dialog-table">
         <table>
-          <thead><tr><th>Turn</th><th>Started</th><th>Input</th><th>Cache</th><th>Output</th><th>Reasoning</th><th>Total</th><th>Estimated cost</th></tr></thead>
+          <thead><tr><th>Turn</th><th>Started</th><th>Input</th><th>Cache read</th><th>Cache write</th><th>Output</th><th>Reasoning</th><th>Total</th><th>Estimated cost</th></tr></thead>
           <tbody id="turn-table"></tbody>
         </table>
       </div>
@@ -121,10 +125,9 @@
 
   <div id="empty-state" class="empty-state" hidden>
     <h2>No native usage indexed</h2>
-    <p>Run a scan after Codex has created session logs.</p>
+    <p>Supported Agent client logs were not found in the configured sources.</p>
     <button class="primary-button" type="button">Scan now</button>
   </div>
   <script src="/app.js" defer></script>
 </body>
 </html>
-

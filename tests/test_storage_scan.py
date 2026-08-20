@@ -5,7 +5,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from token_dashboard.service import scan
+from token_dashboard.scanner import ADAPTERS
+from token_dashboard.service import ScanTarget, scan
 from token_dashboard.storage import Store
 
 
@@ -44,10 +45,13 @@ class StorageScanTests(unittest.TestCase):
         path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
         return secret
 
+    def target(self, root=None, adapter="codex"):
+        return ScanTarget(ADAPTERS[adapter], root or self.source)
+
     def test_repeated_scan_is_idempotent_and_raw_text_is_not_stored(self):
         secret = self.write_session()
-        first = scan(self.source, self.database, self.pricing)
-        second = scan(self.source, self.database, self.pricing)
+        first = scan([self.target()], self.database, self.pricing)
+        second = scan([self.target()], self.database, self.pricing)
         self.assertEqual(first["imported"], 1)
         self.assertEqual(second["imported"], 0)
         self.assertEqual(second["skipped"], 1)
@@ -60,6 +64,13 @@ class StorageScanTests(unittest.TestCase):
         self.assertEqual(status["sessions"], 1)
         self.assertEqual(status["turns"], 1)
         self.assertEqual(dashboard["windows"]["30d"]["total_tokens"], 125)
+        self.assertEqual(dashboard["rankings"]["tools"][0]["label"], "Codex")
+        self.assertEqual(dashboard["rankings"]["tools"][0]["share"], 1)
+        self.assertEqual(len(dashboard["heatmap"]["dates"]), 30)
+        self.assertEqual(dashboard["heatmap"]["scale"], "shared_log_absolute")
+        self.assertTrue(
+            any(cell["tokens"] == 125 for cell in dashboard["heatmap"]["tools"][0]["cells"])
+        )
         self.assertEqual(dashboard["rankings"]["projects"][0]["label"], "private-project")
         self.assertNotIn(secret.encode(), self.database.read_bytes())
         self.assertNotIn(str(self.source).encode(), self.database.read_bytes())
@@ -78,7 +89,7 @@ class StorageScanTests(unittest.TestCase):
 
     def test_changed_source_replaces_derived_rows(self):
         self.write_session()
-        scan(self.source, self.database, self.pricing)
+        scan([self.target()], self.database, self.pricing)
         path = self.source / "session.jsonl"
         data = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
         data["payload"]["info"]["total_token_usage"]["input_tokens"] = 200
@@ -86,7 +97,7 @@ class StorageScanTests(unittest.TestCase):
         lines = path.read_text(encoding="utf-8").splitlines()
         lines[-1] = json.dumps(data)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        result = scan(self.source, self.database, self.pricing)
+        result = scan([self.target()], self.database, self.pricing)
         self.assertEqual(result["imported"], 1)
         store = Store(self.database)
         try:
@@ -96,15 +107,104 @@ class StorageScanTests(unittest.TestCase):
 
     def test_missing_source_is_removed_by_hashed_root_membership(self):
         self.write_session()
-        scan(self.source, self.database, self.pricing)
+        scan([self.target()], self.database, self.pricing)
         (self.source / "session.jsonl").unlink()
-        result = scan(self.source, self.database, self.pricing)
+        result = scan([self.target()], self.database, self.pricing)
         self.assertEqual(result["removed"], 1)
         store = Store(self.database)
         try:
             self.assertEqual(store.status()["sessions"], 0)
         finally:
             store.close()
+
+    def test_multiple_roots_are_idempotent_and_remove_only_the_missing_root(self):
+        self.write_session()
+        second_root = self.root / "second-sessions"
+        second_root.mkdir()
+        second_path = second_root / "session.jsonl"
+        second_path.write_text(
+            (self.source / "session.jsonl").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        targets = [self.target(), self.target(second_root)]
+        first = scan(targets, self.database, self.pricing)
+        second = scan(targets, self.database, self.pricing)
+        self.assertEqual(first["imported"], 2)
+        self.assertEqual(second["skipped"], 2)
+        (self.source / "session.jsonl").unlink()
+        third = scan(targets, self.database, self.pricing)
+        self.assertEqual(third["removed"], 1)
+        store = Store(self.database)
+        try:
+            self.assertEqual(store.status()["sessions"], 1)
+        finally:
+            store.close()
+
+    def test_tool_attribution_and_heatmap_cover_codex_and_claude(self):
+        self.write_session()
+        claude_root = self.root / "claude-projects"
+        claude_root.mkdir()
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        claude = {
+            "type": "assistant",
+            "timestamp": stamp,
+            "cwd": "/code/claude-project",
+            "message": {
+                "id": "message-id",
+                "model": "claude-test",
+                "role": "assistant",
+                "content": "CLAUDE_PRIVATE_CONTENT_MUST_NOT_BE_STORED",
+                "usage": {
+                    "input_tokens": 5,
+                    "cache_creation_input_tokens": 10,
+                    "cache_read_input_tokens": 20,
+                    "output_tokens": 15,
+                },
+            },
+        }
+        (claude_root / "session.jsonl").write_text(
+            json.dumps(claude) + "\n", encoding="utf-8"
+        )
+        duplicate_root = self.root / "claude-duplicate-projects"
+        duplicate_root.mkdir()
+        updated_claude = json.loads(json.dumps(claude))
+        updated_claude["message"]["usage"]["output_tokens"] = 20
+        (duplicate_root / "duplicate.jsonl").write_text(
+            json.dumps(updated_claude) + "\n", encoding="utf-8"
+        )
+        scan(
+            [
+                self.target(),
+                self.target(claude_root, "claude"),
+                self.target(duplicate_root, "claude"),
+            ],
+            self.database,
+            self.pricing,
+        )
+        store = Store(self.database)
+        try:
+            dashboard = store.dashboard(7)
+        finally:
+            store.close()
+        tools = {item["label"]: item for item in dashboard["heatmap"]["tools"]}
+        self.assertEqual(set(tools), {"Codex", "Claude Code"})
+        self.assertEqual(tools["Codex"]["total_tokens"], 125)
+        self.assertEqual(tools["Claude Code"]["total_tokens"], 55)
+        self.assertAlmostEqual(tools["Claude Code"]["share"], 55 / 180)
+        self.assertEqual(sum(cell["tokens"] or 0 for cell in tools["Claude Code"]["cells"]), 55)
+        self.assertNotIn(b"CLAUDE_PRIVATE_CONTENT_MUST_NOT_BE_STORED", self.database.read_bytes())
+
+    def test_unavailable_source_cells_are_not_reported_as_zero(self):
+        missing = self.root / "missing-claude"
+        scan([self.target(missing, "claude")], self.database, self.pricing)
+        store = Store(self.database)
+        try:
+            tool = store.dashboard(7)["heatmap"]["tools"][0]
+        finally:
+            store.close()
+        self.assertEqual(tool["availability"], "unavailable")
+        self.assertTrue(
+            all(cell["tokens"] is None and cell["status"] == "unknown" for cell in tool["cells"])
+        )
 
     def test_legacy_path_schema_is_rebuilt_without_path_bytes(self):
         legacy = self.root / "legacy.sqlite3"
