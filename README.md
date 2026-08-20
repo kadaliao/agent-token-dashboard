@@ -13,20 +13,31 @@ text in the UI.
 ```bash
 git clone https://github.com/kadaliao/agent-token-dashboard.git
 cd agent-token-dashboard
-python3 -m token_dashboard serve --scan --port 8765
+python3 -m token_dashboard serve --scan
 ```
 
-Open `http://127.0.0.1:8765`. Stop the foreground server with `Ctrl-C`.
+The default server listens on `0.0.0.0:8888`. On the MBP, open
+`http://127.0.0.1:8888`; from another device, open
+`http://<MBP-LAN-IP>:8888`. Stop the foreground server with `Ctrl-C`.
+
+**Security warning:** this dashboard has no login or authentication. Any
+network-reachable device can read the dashboard and session-derived data and
+can trigger `POST /api/scan`. Use it only on a trusted network, or bind to the
+local machine explicitly:
+
+```bash
+python3 -m token_dashboard serve --host 127.0.0.1 --port 8888
+```
 
 ```bash
 python3 -m token_dashboard scan
-python3 -m token_dashboard serve --port 8765
+python3 -m token_dashboard serve
 ```
 
 Or scan before starting in one command:
 
 ```bash
-python3 -m token_dashboard serve --scan --port 8765
+python3 -m token_dashboard serve --scan
 ```
 
 The default scan includes both available native sources:
@@ -35,7 +46,8 @@ The default scan includes both available native sources:
 - Claude Code: `~/.claude/projects`
 - database: `./data/token-dashboard.sqlite3`
 - pricing: `./pricing.json`
-- bind address: `127.0.0.1` (local machine only)
+- bind address: `0.0.0.0` (all interfaces; see the security warning above)
+- bind port: `8888`
 
 Any `--source` option replaces the default source set. Repeat it to select
 multiple roots or tools; a bare path is retained as a Codex-only compatibility

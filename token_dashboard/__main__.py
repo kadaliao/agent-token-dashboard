@@ -40,9 +40,13 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--pricing", type=_path, default=ROOT / "pricing.json", help="Local pricing JSON")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("scan", help="incrementally scan native Agent client logs")
-    serve_parser = commands.add_parser("serve", help="start the local web dashboard")
-    serve_parser.add_argument("--host", default="127.0.0.1", help="bind address")
-    serve_parser.add_argument("--port", type=int, default=8765, help="bind port")
+    serve_parser = commands.add_parser("serve", help="start the web dashboard (no authentication)")
+    serve_parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="bind address (default: 0.0.0.0; network-reachable devices can access the unauthenticated dashboard)",
+    )
+    serve_parser.add_argument("--port", type=int, default=8888, help="bind port (default: 8888)")
     serve_parser.add_argument("--scan", action="store_true", help="scan before serving")
     return result
 
