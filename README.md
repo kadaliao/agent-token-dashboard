@@ -6,6 +6,16 @@ and never exposes prompt, response, code, tool, or log text in the UI.
 
 ## Start
 
+### Install / quick start
+
+```bash
+git clone https://github.com/kadaliao/agent-token-dashboard.git
+cd agent-token-dashboard
+python3 -m token_dashboard serve --scan --port 8765
+```
+
+Open `http://127.0.0.1:8765`. Stop the foreground server with `Ctrl-C`.
+
 ```bash
 python3 -m token_dashboard scan
 python3 -m token_dashboard serve --port 8765
@@ -16,8 +26,6 @@ Or scan before starting in one command:
 ```bash
 python3 -m token_dashboard serve --scan --port 8765
 ```
-
-Open `http://127.0.0.1:8765`. Stop a foreground server with `Ctrl-C`.
 
 The defaults are:
 
