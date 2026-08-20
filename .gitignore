@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Local runtime and platform context
+AGENTS.md
+.agent_context/
+.multica/
+data/
+run/
+
+# Local databases and log output
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.log

@@ -1,0 +1,404 @@
+from __future__ import annotations
+
+import hashlib
+import sqlite3
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+from .scanner import ADAPTER_VERSION, COUNTERS, ParsedSession
+
+SCHEMA = """
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+CREATE TABLE IF NOT EXISTS sources (
+    source_key TEXT PRIMARY KEY,
+    root_key TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    parse_errors INTEGER NOT NULL DEFAULT 0,
+    adapter_version INTEGER NOT NULL DEFAULT 1,
+    scanned_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    public_id TEXT PRIMARY KEY,
+    source_key TEXT NOT NULL UNIQUE REFERENCES sources(source_key) ON DELETE CASCADE,
+    agent TEXT NOT NULL,
+    project TEXT NOT NULL,
+    model TEXT,
+    started_at TEXT,
+    ended_at TEXT,
+    parse_errors INTEGER NOT NULL,
+    precision TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS turns (
+    session_id TEXT NOT NULL REFERENCES sessions(public_id) ON DELETE CASCADE,
+    turn_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    started_at TEXT,
+    ended_at TEXT,
+    model TEXT,
+    input_tokens INTEGER NOT NULL,
+    cached_input_tokens INTEGER NOT NULL,
+    cache_write_input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    reasoning_output_tokens INTEGER NOT NULL,
+    input_available INTEGER NOT NULL,
+    cache_available INTEGER NOT NULL,
+    cache_write_available INTEGER NOT NULL,
+    output_available INTEGER NOT NULL,
+    reasoning_available INTEGER NOT NULL,
+    estimated_cost REAL,
+    pricing_known INTEGER NOT NULL,
+    cost_reason TEXT NOT NULL,
+    precision TEXT NOT NULL,
+    PRIMARY KEY (session_id, turn_id)
+);
+CREATE INDEX IF NOT EXISTS idx_turns_started ON turns(started_at);
+CREATE INDEX IF NOT EXISTS idx_turns_model ON turns(model);
+CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
+"""
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def source_key(path: Path) -> str:
+    return hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()
+
+
+def root_key(path: Path) -> str:
+    return hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()
+
+
+def _remove_legacy_database(path: Path) -> None:
+    if not path.exists():
+        return
+    probe = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        exists = probe.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sources'"
+        ).fetchone()
+        if not exists:
+            return
+        columns = {row[1] for row in probe.execute("PRAGMA table_info(sources)")}
+        legacy = "path" in columns or "root" in columns
+    finally:
+        probe.close()
+    if not legacy:
+        return
+    # This database is derived data. Recreate it so legacy path bytes cannot
+    # remain in freed SQLite pages or WAL sidecars.
+    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+        candidate.unlink(missing_ok=True)
+
+
+def _parse_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+class Store:
+    def __init__(self, path: Path):
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _remove_legacy_database(path)
+        self.connection = sqlite3.connect(path, timeout=30, check_same_thread=False)
+        self.connection.row_factory = sqlite3.Row
+        self.connection.executescript(SCHEMA)
+        source_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(sources)")}
+        if "adapter_version" not in source_columns:
+            with self.connection:
+                self.connection.execute("ALTER TABLE sources ADD COLUMN adapter_version INTEGER NOT NULL DEFAULT 1")
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def source_unchanged(self, path: Path, size: int, mtime_ns: int) -> bool:
+        key = source_key(path)
+        row = self.connection.execute(
+            "SELECT size, mtime_ns, status, adapter_version FROM sources WHERE source_key = ?", (key,)
+        ).fetchone()
+        return bool(
+            row
+            and row["status"] == "ok"
+            and row["size"] == size
+            and row["mtime_ns"] == mtime_ns
+            and row["adapter_version"] == ADAPTER_VERSION
+        )
+
+    def replace_source(self, root: Path, path: Path, stat: Any, session: ParsedSession) -> None:
+        source_hash = source_key(path)
+        root_hash = root_key(root)
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO sources(source_key, root_key, size, mtime_ns, status, parse_errors, adapter_version, scanned_at)
+                   VALUES (?, ?, ?, ?, 'ok', ?, ?, ?)
+                   ON CONFLICT(source_key) DO UPDATE SET root_key=excluded.root_key, size=excluded.size,
+                   mtime_ns=excluded.mtime_ns, status='ok', parse_errors=excluded.parse_errors,
+                   adapter_version=excluded.adapter_version, scanned_at=excluded.scanned_at""",
+                (source_hash, root_hash, stat.st_size, stat.st_mtime_ns, session.parse_errors, ADAPTER_VERSION, _now()),
+            )
+            self.connection.execute("DELETE FROM sessions WHERE source_key = ?", (source_hash,))
+            self.connection.execute(
+                """INSERT INTO sessions(public_id, source_key, agent, project, model,
+                   started_at, ended_at, parse_errors, precision)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session.public_id,
+                    source_hash,
+                    session.agent,
+                    session.project,
+                    session.model,
+                    session.started_at,
+                    session.ended_at,
+                    session.parse_errors,
+                    session.precision,
+                ),
+            )
+            self.connection.executemany(
+                """INSERT INTO turns(session_id, turn_id, sequence, started_at, ended_at, model,
+                   input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens,
+                   reasoning_output_tokens, input_available, cache_available, cache_write_available,
+                   output_available, reasoning_available, estimated_cost, pricing_known, cost_reason,
+                   precision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        session.public_id,
+                        turn.turn_id,
+                        turn.sequence,
+                        turn.started_at,
+                        turn.ended_at,
+                        turn.model,
+                        turn.usage["input_tokens"],
+                        turn.usage["cached_input_tokens"],
+                        turn.usage["cache_write_input_tokens"],
+                        turn.usage["output_tokens"],
+                        turn.usage["reasoning_output_tokens"],
+                        int(turn.available["input_tokens"]),
+                        int(turn.available["cached_input_tokens"]),
+                        int(turn.available["cache_write_input_tokens"]),
+                        int(turn.available["output_tokens"]),
+                        int(turn.available["reasoning_output_tokens"]),
+                        turn.cost,
+                        int(turn.pricing_known),
+                        turn.cost_reason,
+                        turn.precision,
+                    )
+                    for turn in session.turns
+                ],
+            )
+
+    def mark_source_error(self, root: Path, path: Path, stat: Any) -> None:
+        source_hash = source_key(path)
+        root_hash = root_key(root)
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO sources(source_key, root_key, size, mtime_ns, status, parse_errors, adapter_version, scanned_at)
+                   VALUES (?, ?, ?, ?, 'error', 1, ?, ?)
+                   ON CONFLICT(source_key) DO UPDATE SET root_key=excluded.root_key,
+                   size=excluded.size, mtime_ns=excluded.mtime_ns,
+                   status='error', adapter_version=excluded.adapter_version, scanned_at=excluded.scanned_at""",
+                (source_hash, root_hash, stat.st_size, stat.st_mtime_ns, ADAPTER_VERSION, _now()),
+            )
+
+    def remove_missing(self, root: Path, present: set[str]) -> int:
+        rows = self.connection.execute(
+            "SELECT source_key FROM sources WHERE root_key = ?", (root_key(root),)
+        ).fetchall()
+        missing = [row["source_key"] for row in rows if row["source_key"] not in present]
+        with self.connection:
+            self.connection.executemany(
+                "DELETE FROM sources WHERE source_key = ?", [(key,) for key in missing]
+            )
+        return len(missing)
+
+    def status(self) -> dict[str, Any]:
+        row = self.connection.execute(
+            """SELECT COUNT(*) AS sources,
+               SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS failed,
+               MAX(scanned_at) AS last_scan FROM sources"""
+        ).fetchone()
+        sessions = self.connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        turns = self.connection.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+        return {
+            "sources": row["sources"] or 0,
+            "failed_sources": row["failed"] or 0,
+            "sessions": sessions,
+            "turns": turns,
+            "last_scan": row["last_scan"],
+            "agent": "Codex",
+            "storage": "numeric usage metadata only",
+        }
+
+    def _turn_rows(self, earliest: datetime) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            """SELECT t.*, s.project, s.agent, s.public_id, s.parse_errors AS session_parse_errors,
+               s.precision AS session_precision
+               FROM turns t JOIN sessions s ON s.public_id=t.session_id
+               WHERE t.started_at >= ? ORDER BY t.started_at ASC""",
+            (earliest.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),),
+        ).fetchall()
+
+    @staticmethod
+    def _aggregate(rows: Iterable[sqlite3.Row]) -> dict[str, Any]:
+        rows = list(rows)
+        result: dict[str, Any] = {key: 0 for key in COUNTERS}
+        total_tokens = 0
+        known_cost = 0.0
+        priced_tokens = 0
+        sessions: set[str] = set()
+        completeness = {key: 0 for key in COUNTERS}
+        for row in rows:
+            token_count = row["input_tokens"] + row["output_tokens"]
+            total_tokens += token_count
+            sessions.add(row["session_id"])
+            for key in COUNTERS:
+                result[key] += row[key]
+            availability = {
+                "input_tokens": row["input_available"],
+                "cached_input_tokens": row["cache_available"],
+                "cache_write_input_tokens": row["cache_write_available"],
+                "output_tokens": row["output_available"],
+                "reasoning_output_tokens": row["reasoning_available"],
+            }
+            for key, present in availability.items():
+                completeness[key] += int(bool(present))
+            if row["pricing_known"]:
+                known_cost += row["estimated_cost"] or 0
+                priced_tokens += token_count
+        count = len(rows)
+        return {
+            **result,
+            "total_tokens": total_tokens,
+            "estimated_cost": round(known_cost, 6),
+            "pricing_coverage": priced_tokens / total_tokens if total_tokens else None,
+            "turns": count,
+            "sessions": len(sessions),
+            "dimension_coverage": {
+                key: round(value / count, 4) if count else None for key, value in completeness.items()
+            },
+        }
+
+    def dashboard(self, days: int = 30) -> dict[str, Any]:
+        now_local = datetime.now().astimezone()
+        today = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        earliest = today - timedelta(days=max(days, 30) - 1)
+        rows = self._turn_rows(earliest)
+
+        def in_window(row: sqlite3.Row, window_days: int) -> bool:
+            stamp = _parse_time(row["started_at"])
+            return bool(stamp and stamp.astimezone() >= today - timedelta(days=window_days - 1))
+
+        windows = {
+            "today": self._aggregate(row for row in rows if in_window(row, 1)),
+            "7d": self._aggregate(row for row in rows if in_window(row, 7)),
+            "30d": self._aggregate(row for row in rows if in_window(row, 30)),
+        }
+        filtered = [row for row in rows if in_window(row, days)]
+
+        trend_groups: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        for row in filtered:
+            stamp = _parse_time(row["started_at"])
+            if stamp:
+                trend_groups[stamp.astimezone().date().isoformat()].append(row)
+        trend = [{"date": date, **self._aggregate(group)} for date, group in sorted(trend_groups.items())]
+
+        def rank(key: str, limit: int = 10) -> list[dict[str, Any]]:
+            groups: dict[str, list[sqlite3.Row]] = defaultdict(list)
+            for row in filtered:
+                label = row[key] or "Unknown"
+                groups[str(label)].append(row)
+            ranked = [{"label": label, **self._aggregate(group)} for label, group in groups.items()]
+            return sorted(ranked, key=lambda item: item["total_tokens"], reverse=True)[:limit]
+
+        session_groups: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        for row in filtered:
+            session_groups[row["session_id"]].append(row)
+        session_rank = []
+        for session_id, group in session_groups.items():
+            aggregate = self._aggregate(group)
+            latest = max((row["ended_at"] or row["started_at"] for row in group), default=None)
+            session_rank.append(
+                {
+                    "id": session_id,
+                    "short_id": session_id[:8],
+                    "project": group[0]["project"],
+                    "model": group[-1]["model"] or "Unknown model",
+                    "ended_at": latest,
+                    **aggregate,
+                }
+            )
+        session_rank.sort(key=lambda item: item["total_tokens"], reverse=True)
+
+        return {
+            "generated_at": _now(),
+            "timezone": str(now_local.tzinfo),
+            "range_days": days,
+            "windows": windows,
+            "range": self._aggregate(filtered),
+            "trend": trend,
+            "rankings": {
+                "models": rank("model"),
+                "projects": rank("project"),
+                "sessions": session_rank[:20],
+            },
+            "provenance": {
+                "agent": "Codex",
+                "source": "native event_msg/token_count cumulative snapshots",
+                "precision": "adjacent native snapshot deltas; reset fallback uses native last_token_usage",
+                "privacy": "no prompt, response, code, tool, or log text stored or returned",
+                "cost": "estimated from local standard API price table; reasoning is included in output",
+            },
+        }
+
+    def session_detail(self, public_id: str) -> dict[str, Any] | None:
+        session = self.connection.execute(
+            """SELECT public_id, agent, project, model, started_at, ended_at, parse_errors, precision
+               FROM sessions WHERE public_id = ?""",
+            (public_id,),
+        ).fetchone()
+        if not session:
+            return None
+        rows = self.connection.execute(
+            "SELECT * FROM turns WHERE session_id = ? ORDER BY sequence", (public_id,)
+        ).fetchall()
+        turns = []
+        for row in rows:
+            turns.append(
+                {
+                    "sequence": row["sequence"],
+                    "started_at": row["started_at"],
+                    "ended_at": row["ended_at"],
+                    "model": row["model"] or "Unknown model",
+                    "input_tokens": row["input_tokens"] if row["input_available"] else None,
+                    "cached_input_tokens": row["cached_input_tokens"] if row["cache_available"] else None,
+                    "cache_write_input_tokens": row["cache_write_input_tokens"] if row["cache_write_available"] else None,
+                    "output_tokens": row["output_tokens"] if row["output_available"] else None,
+                    "reasoning_output_tokens": row["reasoning_output_tokens"] if row["reasoning_available"] else None,
+                    "total_tokens": row["input_tokens"] + row["output_tokens"],
+                    "estimated_cost": row["estimated_cost"] if row["pricing_known"] else None,
+                    "cost_reason": row["cost_reason"],
+                    "precision": row["precision"],
+                }
+            )
+        return {
+            "id": session["public_id"],
+            "short_id": session["public_id"][:8],
+            "agent": session["agent"],
+            "project": session["project"],
+            "model": session["model"] or "Unknown model",
+            "started_at": session["started_at"],
+            "ended_at": session["ended_at"],
+            "parse_errors": session["parse_errors"],
+            "precision": session["precision"],
+            "summary": self._aggregate(rows),
+            "turns": turns,
+        }
