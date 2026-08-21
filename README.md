@@ -90,12 +90,54 @@ tokens” is therefore input plus output; cache and reasoning are displayed as
 subsets and are not added again. Reasoning tokens are already included in
 output tokens for pricing.
 
-The primary heatmap uses individual native tool names as rows and every local
-day in the selected 7/30/90-day range as columns. A cell is the deduplicated
-native call count for that tool-day. It shows each tool's total calls, share of
-calls, and its token attribution. Agent clients and projects are secondary
-drilldowns, never the default heatmap grouping. All visible cells share one
-absolute logarithmic intensity scale.
+The primary explorer has four linked views, all based on the same deduplicated
+native call events:
+
+- **Composition** is the default. It shows 100% family share over time with an
+  aligned absolute-volume strip and a `Share / Calls` switch. 7- and 30-day
+  ranges default to local days; 90 days defaults to ISO weeks.
+- **Snapshot** is a nested family-to-raw-tool treemap with an exact ranking.
+- **Hierarchy** is a family-to-raw-tool sunburst with a synchronized tree/list.
+  On narrow screens it becomes a single-ring family or tool donut.
+- **Activity** retains the raw-tool-by-local-day heatmap on a shared absolute
+  logarithmic scale.
+
+Family and raw-tool choices filter every view. The selected range, view,
+metric, time grain, family, and tool are stored in normalized URL query
+parameters so a valid state survives refresh. Each chart has keyboard
+selection and return paths, and the explorer includes an equivalent period
+table plus complete exact rankings. Leaves under 1% of selected-range calls
+are grouped into a stable `Other tools (n)` visual mark where needed, while
+the complete raw list remains available beside the chart.
+
+Agent clients and projects remain secondary drilldowns, never the default
+tool-call grouping.
+
+## Tool taxonomy and API
+
+The backend owns an explicit, versioned exact-name taxonomy in
+`token_dashboard/taxonomy.py`. Its initial families are `Execution`,
+`Coordination`, `Files`, `Research`, and `Workflow`. A name absent from the
+exact mapping remains visible under the independent `Unmapped` family; the
+dashboard never guesses from a prefix or silently folds it into `Other`.
+
+`GET /api/dashboard?days=30&grain=day` includes:
+
+```text
+tool_composition:
+  grain
+  taxonomy_version
+  total_calls
+  totals_by_period[]: period, label, calls
+  families[]: key, label, color, calls, share, periods[], tools[]
+  unmapped_calls
+  token_precision
+```
+
+Every raw tool remains a leaf. Family, period, and tool totals conserve the
+same native call count returned by the Activity heatmap. `grain` accepts
+`day` or `week`; without it, ranges over 30 days default to ISO week and
+shorter ranges default to day.
 
 ## Pricing and precision
 
@@ -127,4 +169,7 @@ unknown and never splits message or turn tokens across calls.
 
 ```bash
 python3 -m unittest discover -s tests -v
+node --check token_dashboard/static/state.js
+node --check token_dashboard/static/app.js
+node tests/test_ui_state.js
 ```

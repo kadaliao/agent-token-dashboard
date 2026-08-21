@@ -23,28 +23,65 @@
   </header>
 
   <main>
-    <section class="heatmap-band" aria-labelledby="heatmap-title">
-      <div class="section-heading heatmap-heading">
+    <section class="explorer-band" aria-labelledby="explorer-title">
+      <div class="section-heading explorer-heading">
         <div>
-          <p class="kicker">Native tool call x local day</p>
-          <h2 id="heatmap-title">Tool call activity</h2>
-          <p id="heatmap-total" class="section-total"></p>
+          <p class="kicker">Native tool calls · tool tokens unknown</p>
+          <h2 id="explorer-title">Tool composition</h2>
+          <p id="explorer-total" class="section-total"></p>
         </div>
         <div class="segmented" aria-label="Reporting range">
-          <button type="button" data-days="7">7d</button>
+          <button type="button" data-days="7" aria-pressed="false">7d</button>
           <button type="button" data-days="30" class="active" aria-pressed="true">30d</button>
-          <button type="button" data-days="90">90d</button>
+          <button type="button" data-days="90" aria-pressed="false">90d</button>
         </div>
       </div>
-      <div class="heatmap-legend" aria-label="Heatmap legend">
-        <span class="legend-label">Shared absolute log scale</span>
-        <span class="legend-gradient" aria-hidden="true"></span>
-        <span>0</span><span id="legend-max">-- calls</span>
-        <span class="legend-zero" aria-hidden="true"></span><span>Zero</span>
-        <span class="legend-unknown" aria-hidden="true"></span><span>Unavailable</span>
+
+      <div class="view-toolbar">
+        <div class="view-tabs" role="tablist" aria-label="Tool visualization">
+          <button type="button" role="tab" data-view="composition" aria-selected="true">Composition</button>
+          <button type="button" role="tab" data-view="snapshot" aria-selected="false">Snapshot</button>
+          <button type="button" role="tab" data-view="hierarchy" aria-selected="false">Hierarchy</button>
+          <button type="button" role="tab" data-view="activity" aria-selected="false">Activity</button>
+        </div>
+        <div class="chart-controls">
+          <div class="segmented metric-switch" aria-label="Chart metric">
+            <button type="button" data-metric="share" class="active" aria-pressed="true">Share</button>
+            <button type="button" data-metric="calls" aria-pressed="false">Calls</button>
+          </div>
+          <div class="segmented grain-switch" aria-label="Time grain">
+            <button type="button" data-grain="day" class="active" aria-pressed="true">Day</button>
+            <button type="button" data-grain="week" aria-pressed="false">Week</button>
+          </div>
+        </div>
       </div>
-      <div class="heatmap-scroll" tabindex="0" aria-label="Tool usage heatmap, horizontally scrollable">
-        <div id="heatmap" class="heatmap" role="grid"></div>
+
+      <div id="filter-bar" class="filter-bar" hidden>
+        <span class="filter-label">Filtered</span>
+        <button id="family-filter" type="button"></button>
+        <span id="filter-separator" aria-hidden="true">/</span>
+        <button id="tool-filter" type="button"></button>
+        <button id="clear-filter" class="clear-button" type="button">Clear</button>
+      </div>
+
+      <div class="explorer-layout">
+        <div class="chart-column">
+          <div id="chart-scroll" class="chart-scroll" tabindex="0" aria-label="Chart, horizontally scrollable when needed">
+            <div id="chart-root"></div>
+          </div>
+          <p id="chart-focus" class="chart-focus" aria-live="polite">Focus a chart mark for exact calls and share.</p>
+          <details class="data-table-details">
+            <summary>Equivalent data table</summary>
+            <div class="table-scroll"><table id="composition-table"></table></div>
+          </details>
+        </div>
+        <aside class="tool-ranking" aria-labelledby="tool-ranking-title">
+          <div class="ranking-heading">
+            <div><p class="kicker">Exact values</p><h3 id="tool-ranking-title">Tool families</h3></div>
+            <span id="taxonomy-version" class="taxonomy-version"></span>
+          </div>
+          <div id="tool-ranking" class="ranking-list"></div>
+        </aside>
       </div>
     </section>
 
@@ -128,6 +165,7 @@
     <p>Supported Agent client logs were not found in the configured sources.</p>
     <button class="primary-button" type="button">Scan now</button>
   </div>
+  <script src="/state.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

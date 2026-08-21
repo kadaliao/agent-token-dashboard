@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .scanner import COUNTERS, ParsedSession
+from .taxonomy import FAMILIES, TAXONOMY_VERSION, family_for_tool
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -396,7 +397,7 @@ class Store:
             },
         }
 
-    def dashboard(self, days: int = 30) -> dict[str, Any]:
+    def dashboard(self, days: int = 30, grain: str | None = None) -> dict[str, Any]:
         now_local = datetime.now().astimezone()
         today = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
         earliest = today - timedelta(days=max(days, 30) - 1)
@@ -514,6 +515,117 @@ class Store:
             })
         native_tool_rows.sort(key=lambda item: (-item["calls"], item["label"].lower()))
 
+        composition_grain = grain if grain in {"day", "week"} else ("week" if days > 30 else "day")
+        period_keys: list[str] = []
+        period_labels: dict[str, str] = {}
+        date_period: dict[str, str] = {}
+        for date in dates:
+            parsed_date = datetime.fromisoformat(date).date()
+            if composition_grain == "week":
+                iso_year, iso_week, _ = parsed_date.isocalendar()
+                period = f"{iso_year}-W{iso_week:02d}"
+                week_start = parsed_date - timedelta(days=parsed_date.weekday())
+                label = week_start.isoformat()
+            else:
+                period = date
+                label = date
+            date_period[date] = period
+            period_labels[period] = label
+            if period not in period_keys:
+                period_keys.append(period)
+
+        period_call_groups: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        family_call_groups: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        family_period_groups: dict[tuple[str, str], list[sqlite3.Row]] = defaultdict(list)
+        family_tool_groups: dict[tuple[str, str], list[sqlite3.Row]] = defaultdict(list)
+        family_tool_period_groups: dict[tuple[str, str, str], list[sqlite3.Row]] = defaultdict(list)
+        for row in filtered_calls:
+            stamp = _parse_time(row["occurred_at"])
+            if not stamp:
+                continue
+            date = stamp.astimezone().date().isoformat()
+            period = date_period.get(date)
+            if not period:
+                continue
+            family = family_for_tool(row["tool_name"])
+            period_call_groups[period].append(row)
+            family_call_groups[family].append(row)
+            family_period_groups[(family, period)].append(row)
+            family_tool_groups[(family, row["tool_name"])].append(row)
+            family_tool_period_groups[(family, row["tool_name"], period)].append(row)
+
+        totals_by_period = []
+        for period in period_keys:
+            period_calls = len(period_call_groups[period])
+            totals_by_period.append({
+                "period": period,
+                "label": period_labels[period],
+                "calls": period_calls,
+            })
+
+        family_rows = []
+        total_native_calls = len(filtered_calls)
+        for definition in FAMILIES:
+            key = definition["key"]
+            family_calls = len(family_call_groups[key])
+            tool_names = sorted(
+                (name for family, name in family_tool_groups if family == key),
+                key=lambda name: (-len(family_tool_groups[(key, name)]), name.lower()),
+            )
+            tools = []
+            for name in tool_names:
+                calls_for_tool = len(family_tool_groups[(key, name)])
+                tools.append({
+                    "key": hashlib.sha256(name.encode("utf-8")).hexdigest()[:12],
+                    "label": name,
+                    "calls": calls_for_tool,
+                    "share": calls_for_tool / total_native_calls if total_native_calls else 0,
+                    "family_share": calls_for_tool / family_calls if family_calls else 0,
+                    "token_precision": "unknown",
+                    "periods": [
+                        {
+                            "period": period,
+                            "calls": len(family_tool_period_groups[(key, name, period)]),
+                            "share": (
+                                len(family_tool_period_groups[(key, name, period)])
+                                / len(period_call_groups[period])
+                                if period_call_groups[period]
+                                else 0
+                            ),
+                        }
+                        for period in period_keys
+                    ],
+                })
+            family_rows.append({
+                **definition,
+                "calls": family_calls,
+                "share": family_calls / total_native_calls if total_native_calls else 0,
+                "periods": [
+                    {
+                        "period": period,
+                        "calls": len(family_period_groups[(key, period)]),
+                        "share": (
+                            len(family_period_groups[(key, period)])
+                            / len(period_call_groups[period])
+                            if period_call_groups[period]
+                            else 0
+                        ),
+                    }
+                    for period in period_keys
+                ],
+                "tools": tools,
+            })
+
+        tool_composition = {
+            "grain": composition_grain,
+            "taxonomy_version": TAXONOMY_VERSION,
+            "total_calls": total_native_calls,
+            "totals_by_period": totals_by_period,
+            "families": family_rows,
+            "unmapped_calls": len(family_call_groups["unmapped"]),
+            "token_precision": "unknown",
+        }
+
         def rank(key: str, limit: int = 10) -> list[dict[str, Any]]:
             groups: dict[str, list[sqlite3.Row]] = defaultdict(list)
             for row in filtered:
@@ -554,6 +666,7 @@ class Store:
                 "scale": "shared_log_absolute",
                 "tools": native_tool_rows,
             },
+            "tool_composition": tool_composition,
             "rankings": {
                 "native_tools": native_tool_rows,
                 "clients": tool_rows,

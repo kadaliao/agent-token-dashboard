@@ -169,9 +169,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
             except ValueError:
                 days = 30
+            grain = query.get("grain", [None])[0]
+            if grain not in {"day", "week"}:
+                grain = None
             store = self._store()
             try:
-                self._json(store.dashboard(days))
+                self._json(store.dashboard(days, grain))
             finally:
                 store.close()
             return

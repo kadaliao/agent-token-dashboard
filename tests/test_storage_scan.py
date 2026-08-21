@@ -67,6 +67,14 @@ class StorageScanTests(unittest.TestCase):
         self.assertEqual(dashboard["windows"]["30d"]["total_tokens"], 125)
         self.assertEqual(dashboard["rankings"]["native_tools"][0]["label"], "exec_command")
         self.assertEqual(dashboard["rankings"]["native_tools"][0]["share"], 1)
+        composition = dashboard["tool_composition"]
+        self.assertEqual(composition["taxonomy_version"], "2026-08-21.v1")
+        self.assertEqual(composition["grain"], "day")
+        self.assertEqual(composition["total_calls"], 1)
+        execution = next(item for item in composition["families"] if item["key"] == "execution")
+        self.assertEqual(execution["calls"], 1)
+        self.assertEqual(execution["tools"][0]["label"], "exec_command")
+        self.assertEqual(execution["tools"][0]["token_precision"], "unknown")
         self.assertEqual(len(dashboard["heatmap"]["dates"]), 30)
         self.assertEqual(dashboard["heatmap"]["scale"], "shared_log_absolute")
         tool = dashboard["heatmap"]["tools"][0]
@@ -225,6 +233,50 @@ class StorageScanTests(unittest.TestCase):
         finally:
             store.close()
         self.assertEqual(tools, [])
+
+    def test_tool_taxonomy_unmapped_and_composition_conservation(self):
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        records = [
+            {"timestamp": stamp, "type": "session_meta", "payload": {"id": "taxonomy"}},
+            {"timestamp": stamp, "type": "response_item", "payload": {"type": "function_call", "call_id": "exec", "name": "shell_command"}},
+            {"timestamp": stamp, "type": "response_item", "payload": {"type": "function_call", "call_id": "file", "name": "apply_patch"}},
+            {"timestamp": stamp, "type": "response_item", "payload": {"type": "function_call", "call_id": "workflow", "name": "TaskCreate"}},
+            {"timestamp": stamp, "type": "response_item", "payload": {"type": "function_call", "call_id": "new", "name": "FutureTool"}},
+        ]
+        (self.source / "taxonomy.jsonl").write_text(
+            "".join(json.dumps(item) + "\n" for item in records), encoding="utf-8"
+        )
+        scan([self.target()], self.database, self.pricing)
+        store = Store(self.database)
+        try:
+            composition = store.dashboard(30)["tool_composition"]
+            weekly = store.dashboard(90)["tool_composition"]
+            forced_daily = store.dashboard(90, "day")["tool_composition"]
+        finally:
+            store.close()
+
+        families = {item["key"]: item for item in composition["families"]}
+        self.assertEqual(families["execution"]["calls"], 1)
+        self.assertEqual(families["files"]["calls"], 1)
+        self.assertEqual(families["workflow"]["calls"], 1)
+        self.assertEqual(families["unmapped"]["calls"], 1)
+        self.assertEqual(families["unmapped"]["tools"][0]["label"], "FutureTool")
+        self.assertEqual(composition["unmapped_calls"], 1)
+        self.assertEqual(sum(item["calls"] for item in families.values()), composition["total_calls"])
+        self.assertEqual(sum(item["calls"] for item in composition["totals_by_period"]), composition["total_calls"])
+        for family in families.values():
+            self.assertEqual(sum(item["calls"] for item in family["periods"]), family["calls"])
+            self.assertEqual(sum(item["calls"] for item in family["tools"]), family["calls"])
+        for index, period in enumerate(composition["totals_by_period"]):
+            self.assertEqual(
+                sum(family["periods"][index]["calls"] for family in families.values()),
+                period["calls"],
+            )
+        self.assertEqual(weekly["grain"], "week")
+        self.assertEqual(forced_daily["grain"], "day")
+        self.assertEqual(len(forced_daily["totals_by_period"]), 90)
+        self.assertLessEqual(len(weekly["totals_by_period"]), 14)
+        self.assertTrue(all("-W" in item["period"] for item in weekly["totals_by_period"]))
 
     def test_legacy_path_schema_is_rebuilt_without_path_bytes(self):
         legacy = self.root / "legacy.sqlite3"
