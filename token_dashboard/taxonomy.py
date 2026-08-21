@@ -93,4 +93,3 @@ TOOL_FAMILY: Final = {
 
 def family_for_tool(tool_name: str) -> str:
     return TOOL_FAMILY.get(tool_name, "unmapped")
-
