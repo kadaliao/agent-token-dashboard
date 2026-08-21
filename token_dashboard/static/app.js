@@ -875,8 +875,14 @@ document.querySelectorAll("[data-days]").forEach(button => button.addEventListen
   writeUrl();
   await refresh();
 }));
-document.querySelector(".explorer-band").addEventListener("keydown", event => {
-  if (event.key === "Escape" && state.family) {
+document.addEventListener("keydown", event => {
+  const dialogOpen = document.getElementById("session-dialog").open;
+  if (DashboardState.shouldHandleEscape({
+    key: event.key,
+    hasSelection: state.family,
+    dialogOpen,
+    defaultPrevented: event.defaultPrevented,
+  })) {
     event.preventDefault();
     stepBack();
   }

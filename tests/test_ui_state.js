@@ -44,4 +44,16 @@ const serialized = state.serialize({
 });
 assert.equal(serialized.includes("<"), false);
 assert.equal(state.parse(serialized).tool, "<Read>");
+assert.equal(state.shouldHandleEscape({
+  key: "Escape", hasSelection: true, dialogOpen: false, defaultPrevented: false,
+}), true);
+assert.equal(state.shouldHandleEscape({
+  key: "Escape", hasSelection: true, dialogOpen: true, defaultPrevented: false,
+}), false);
+assert.equal(state.shouldHandleEscape({
+  key: "Escape", hasSelection: true, dialogOpen: false, defaultPrevented: true,
+}), false);
+assert.equal(state.shouldHandleEscape({
+  key: "Enter", hasSelection: true, dialogOpen: false, defaultPrevented: false,
+}), false);
 console.log("ui state tests passed");

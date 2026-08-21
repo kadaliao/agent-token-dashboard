@@ -85,5 +85,9 @@
     return { visible, hidden };
   }
 
-  return { parse, normalize, serialize, stableLongTail };
+  function shouldHandleEscape({ key, hasSelection, dialogOpen, defaultPrevented }) {
+    return key === "Escape" && Boolean(hasSelection) && !dialogOpen && !defaultPrevented;
+  }
+
+  return { parse, normalize, serialize, stableLongTail, shouldHandleEscape };
 });
