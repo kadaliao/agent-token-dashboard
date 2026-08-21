@@ -1,5 +1,7 @@
 # Agent Token Dashboard
 
+Current release: **0.1.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 A local-only dashboard for native Agent client token usage and tool-call
 activity. It reads Codex and Claude Code JSONL sessions without modifying them,
 stores only numeric usage metadata, native tool names/timestamps, and
