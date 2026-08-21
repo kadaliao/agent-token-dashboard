@@ -2,7 +2,8 @@
 
 A local-only dashboard for native Agent client token usage and tool-call
 activity. It reads Codex and Claude Code JSONL sessions without modifying them,
-stores only numeric usage metadata plus native tool names/timestamps in SQLite,
+stores only numeric usage metadata, native tool names/timestamps, and
+privacy-safe command basenames in SQLite,
 and never exposes prompt, response, code, tool arguments, tool results, or log
 text in the UI.
 
@@ -13,6 +14,7 @@ text in the UI.
 ```bash
 git clone https://github.com/kadaliao/agent-token-dashboard.git
 cd agent-token-dashboard
+python3 -m pip install -r requirements.txt
 python3 -m token_dashboard serve --scan
 ```
 
@@ -81,7 +83,8 @@ counter in these logs, so reasoning remains unknown rather than zero.
 
 Stored fields are limited to timestamps, model, the final path component of
 the working directory (project label), hashed source/session/call identifiers,
-native tool names, numeric usage counters, parse health, and estimated cost.
+native tool names, normalized command basenames, numeric usage counters, parse
+health, and estimated cost.
 Raw conversation and tool arguments/results are neither stored nor returned by
 the HTTP API.
 
@@ -90,20 +93,21 @@ tokens” is therefore input plus output; cache and reasoning are displayed as
 subsets and are not added again. Reasoning tokens are already included in
 output tokens for pricing.
 
-The primary explorer has four linked views, all based on the same deduplicated
-native call events:
+The primary explorer defaults to **Commands** and can switch to **Agent tools**.
+Both dimensions have four linked views and independently conserved,
+deduplicated event sets:
 
 - **Composition** is the default. It shows 100% family share over time with an
   aligned absolute-volume strip and a `Share / Calls` switch. 7- and 30-day
   ranges default to local days; 90 days defaults to ISO weeks.
-- **Snapshot** is a nested family-to-raw-tool treemap with an exact ranking.
-- **Hierarchy** is a family-to-raw-tool sunburst with a synchronized tree/list.
+- **Snapshot** is a nested family-to-exact-name treemap with an exact ranking.
+- **Hierarchy** is a family-to-exact-name sunburst with a synchronized tree/list.
   On narrow screens it becomes a single-ring family or tool donut.
-- **Activity** retains the raw-tool-by-local-day heatmap on a shared absolute
+- **Activity** retains the exact-name-by-local-day heatmap on a shared absolute
   logarithmic scale.
 
-Family and raw-tool choices filter every view. The selected range, view,
-metric, time grain, family, and tool are stored in normalized URL query
+Family and exact-name choices filter every view. The selected dimension,
+range, view, metric, time grain, family, and name are stored in normalized URL query
 parameters so a valid state survives refresh. Each chart has keyboard
 selection and return paths, and the explorer includes an equivalent period
 table plus complete exact rankings. Leaves under 1% of selected-range calls
@@ -113,7 +117,31 @@ the complete raw list remains available beside the chart.
 Agent clients and projects remain secondary drilldowns, never the default
 tool-call grouping.
 
-## Tool taxonomy and API
+## Command parsing, taxonomy, and API
+
+Only explicit shell schemas are eligible for command parsing: Codex
+`exec_command.arguments.cmd`, `shell_command.arguments.command`,
+`shell.arguments.command`, and Claude Code `Bash.input.command`. Codex custom
+`exec.input` is JavaScript orchestration, so a separate `esprima` AST pass
+extracts only static object-literal arguments to `tools.exec_command` and
+`tools.shell_command`; it never treats JavaScript itself as shell. Invalid JSON,
+missing fields, unsupported syntax, dynamic
+executable expansion, and otherwise unreliable calls produce one `unknown`
+invocation. The raw payload is never stored.
+
+Commands are parsed with `bashlex` into Bash AST nodes without executing input.
+Each syntactic simple command in a pipeline, list, chain, or multiline payload
+is counted independently. Absolute executables are normalized to a bounded,
+safe basename. `env`, `sudo`, `command`, and `nohup` are unwrapped only when
+their AST-tokenized option semantics are reliable. Static `bash -c` and `sh -c`
+payloads recurse with a depth limit. `xargs` is counted as `xargs`; its child
+invocation count depends on runtime input and is not guessed. Commands inside
+argument substitutions are not counted as top-level invocations.
+
+The derived `command_invocations` table stores only a hashed session reference,
+hashed event and parent keys, normalized command name, timestamp, and outer
+agent tool. It never stores full commands, arguments, paths, environment
+variables, results, or log text.
 
 The backend owns an explicit, versioned exact-name taxonomy in
 `token_dashboard/taxonomy.py`. Its initial families are `Execution`,
@@ -121,10 +149,12 @@ The backend owns an explicit, versioned exact-name taxonomy in
 exact mapping remains visible under the independent `Unmapped` family; the
 dashboard never guesses from a prefix or silently folds it into `Other`.
 
-`GET /api/dashboard?days=30&grain=day` includes:
+`GET /api/dashboard?dimension=commands&days=30&grain=day` includes a unified
+explorer contract for `commands` (default) or `tools`:
 
 ```text
 tool_composition:
+  dimension
   grain
   taxonomy_version
   total_calls
@@ -132,10 +162,19 @@ tool_composition:
   families[]: key, label, color, calls, share, periods[], tools[]
   unmapped_calls
   token_precision
+  coverage: shell_calls, parsed_invocations, unknown_invocations, unknown_shell_calls
 ```
 
-Every raw tool remains a leaf. Family, period, and tool totals conserve the
-same native call count returned by the Activity heatmap. `grain` accepts
+The same response also exposes `explorer` with `dimension`, `taxonomy_version`,
+`composition`, `heatmap`, `ranking`, and `coverage`, so clients can consume one
+dimension-neutral contract. Legacy top-level keys remain for compatibility.
+
+Every exact command/tool remains a leaf. Command families are versioned as
+`Files`, `Search`, `Version control`, `Build & test`, `System`, `Shell`,
+`Network`, `Other`, and `Unknown`; unrecognized but safe static names remain
+visible under `Other`, while parse failures stay separate under `Unknown`.
+Family, period, and leaf totals conserve the same invocation/call count returned
+by the Activity heatmap. `grain` accepts
 `day` or `week`; without it, ranges over 30 days default to ISO week and
 shorter ranges default to day.
 
@@ -164,6 +203,8 @@ explicitly estimated tool arguments/results. Otherwise it is `unknown`.
 Current native Codex and Claude Code logs supply session/turn usage but no
 per-call attribution, so this dashboard deliberately reports tool tokens as
 unknown and never splits message or turn tokens across calls.
+Command tokens are also unknown for the same reason; the dashboard never assigns
+an outer call or turn's tokens to one or more derived commands.
 
 ## Tests
 

@@ -9,6 +9,7 @@
   const VALID_VIEWS = new Set(["composition", "snapshot", "hierarchy", "activity"]);
   const VALID_METRICS = new Set(["share", "calls"]);
   const VALID_GRAINS = new Set(["day", "week"]);
+  const VALID_DIMENSIONS = new Set(["commands", "tools"]);
 
   function cleanValue(value) {
     return typeof value === "string" && value.length <= 160 ? value : null;
@@ -22,12 +23,13 @@
     const requestedMetric = params.get("metric");
     const requestedGrain = params.get("grain");
     return {
+      dimension: VALID_DIMENSIONS.has(params.get("dimension")) ? params.get("dimension") : "commands",
       days,
       view: VALID_VIEWS.has(requestedView) ? requestedView : "composition",
       metric: VALID_METRICS.has(requestedMetric) ? requestedMetric : "share",
       grain: VALID_GRAINS.has(requestedGrain) ? requestedGrain : (days === 90 ? "week" : "day"),
       family: cleanValue(params.get("family")),
-      tool: cleanValue(params.get("tool")),
+      tool: cleanValue(params.get("name") || params.get("tool")),
     };
   }
 
@@ -51,12 +53,13 @@
 
   function serialize(value) {
     const params = new URLSearchParams();
+    params.set("dimension", VALID_DIMENSIONS.has(value.dimension) ? value.dimension : "commands");
     params.set("days", String(VALID_DAYS.has(Number(value.days)) ? Number(value.days) : 30));
     params.set("view", VALID_VIEWS.has(value.view) ? value.view : "composition");
     params.set("metric", VALID_METRICS.has(value.metric) ? value.metric : "share");
     params.set("grain", VALID_GRAINS.has(value.grain) ? value.grain : (Number(value.days) === 90 ? "week" : "day"));
     if (cleanValue(value.family)) params.set("family", value.family);
-    if (cleanValue(value.tool)) params.set("tool", value.tool);
+    if (cleanValue(value.tool)) params.set("name", value.tool);
     return `?${params.toString()}`;
   }
 

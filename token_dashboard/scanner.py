@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .pricing import PricingTable
+from .commands import CommandInvocation, invocations_for_call, invocations_for_exec
 
 COUNTERS = (
     "input_tokens",
@@ -114,6 +115,7 @@ class ParsedSession:
     ended_at: str | None
     turns: list[Turn]
     tool_calls: list[ToolCall]
+    command_invocations: list[CommandInvocation]
     parse_errors: int
     precision: str
 
@@ -131,6 +133,7 @@ def parse_codex_file(path: Path, pricing: PricingTable) -> ParsedSession:
     reset_recoveries = 0
     unattributed_index = 0
     tool_calls: OrderedDict[str, ToolCall] = OrderedDict()
+    command_invocations: OrderedDict[str, CommandInvocation] = OrderedDict()
     call_ordinal = 0
 
     def ensure_turn(turn_id: str, started_at: str | None = None) -> Turn:
@@ -181,8 +184,8 @@ def parse_codex_file(path: Path, pricing: PricingTable) -> ParsedSession:
                         project = _project_label(payload.get("cwd"))
                 continue
 
-            # Native response items identify calls but do not assign token usage
-            # to an individual call. Deliberately do not inspect arguments/output.
+            # Shell payloads are parsed only in memory. Neither payload nor AST is
+            # retained; the derived record contains a normalized basename only.
             if record_type == "response_item":
                 call_type = payload.get("type")
                 name = payload.get("name")
@@ -195,6 +198,31 @@ def parse_codex_file(path: Path, pricing: PricingTable) -> ParsedSession:
                     prefix = "codex-call-id" if isinstance(native_id, str) and native_id else "codex-call-local"
                     event_key = hashlib.sha256(f"{prefix}:{identity}".encode("utf-8")).hexdigest()
                     tool_calls[event_key] = ToolCall(event_key, name, stamp)
+                    if name == "exec" and call_type == "custom_tool_call":
+                        source = payload.get("input") if isinstance(payload.get("input"), str) else None
+                        for invocation in invocations_for_exec(
+                            parent_event_key=event_key, occurred_at=stamp, source=source
+                        ):
+                            command_invocations[invocation.event_key] = invocation
+                    elif name in {"exec_command", "shell_command", "shell"} and call_type == "function_call":
+                        command: str | None = None
+                        arguments = payload.get("arguments")
+                        if isinstance(arguments, str):
+                            try:
+                                parsed_arguments = json.loads(arguments)
+                            except json.JSONDecodeError:
+                                parsed_arguments = None
+                            field = "cmd" if name == "exec_command" else "command"
+                            if isinstance(parsed_arguments, dict) and isinstance(parsed_arguments.get(field), str):
+                                command = parsed_arguments[field]
+                    if name in {"exec_command", "shell_command", "shell"}:
+                        for invocation in invocations_for_call(
+                            parent_event_key=event_key,
+                            outer_tool=name,
+                            occurred_at=stamp,
+                            command=command,
+                        ):
+                            command_invocations[invocation.event_key] = invocation
                 continue
 
             if record_type != "event_msg":
@@ -262,6 +290,7 @@ def parse_codex_file(path: Path, pricing: PricingTable) -> ParsedSession:
         ended_at=last_timestamp,
         turns=parsed_turns,
         tool_calls=list(tool_calls.values()),
+        command_invocations=list(command_invocations.values()),
         parse_errors=parse_errors,
         precision="native_delta_with_resets" if reset_recoveries else "native_delta",
     )
@@ -283,6 +312,7 @@ def parse_claude_file(path: Path, pricing: PricingTable) -> ParsedSession:
     turns: OrderedDict[str, Turn] = OrderedDict()
     parse_errors = 0
     tool_calls: OrderedDict[str, ToolCall] = OrderedDict()
+    command_invocations: OrderedDict[str, CommandInvocation] = OrderedDict()
     call_ordinal = 0
 
     with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -314,6 +344,20 @@ def parse_claude_file(path: Path, pricing: PricingTable) -> ParsedSession:
                     prefix = "claude-call-id" if isinstance(native_id, str) and native_id else "claude-call-local"
                     event_key = hashlib.sha256(f"{prefix}:{identity}".encode("utf-8")).hexdigest()
                     tool_calls[event_key] = ToolCall(event_key, name, stamp)
+                    if name == "Bash":
+                        block_input = block.get("input")
+                        command = (
+                            block_input.get("command")
+                            if isinstance(block_input, dict) and isinstance(block_input.get("command"), str)
+                            else None
+                        )
+                        for invocation in invocations_for_call(
+                            parent_event_key=event_key,
+                            outer_tool=name,
+                            occurred_at=stamp,
+                            command=command,
+                        ):
+                            command_invocations[invocation.event_key] = invocation
             if record.get("type") != "assistant":
                 continue
             raw_usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
@@ -393,6 +437,7 @@ def parse_claude_file(path: Path, pricing: PricingTable) -> ParsedSession:
         ended_at=last_timestamp,
         turns=list(turns.values()),
         tool_calls=list(tool_calls.values()),
+        command_invocations=list(command_invocations.values()),
         parse_errors=parse_errors,
         precision="native_message_usage",
     )
@@ -414,6 +459,6 @@ class Adapter:
 
 
 ADAPTERS = {
-    "codex": Adapter("codex", "Codex", 6, find_codex_logs, parse_codex_file),
-    "claude": Adapter("claude", "Claude Code", 3, find_claude_logs, parse_claude_file),
+    "codex": Adapter("codex", "Codex", 7, find_codex_logs, parse_codex_file),
+    "claude": Adapter("claude", "Claude Code", 4, find_claude_logs, parse_claude_file),
 }

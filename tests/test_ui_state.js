@@ -18,7 +18,7 @@ const fixture = {
 
 assert.deepEqual(
   state.parse("?days=oops&view=%3Cscript%3E&metric=nope&grain=bad&family=x&tool=y"),
-  { days: 30, view: "composition", metric: "share", grain: "day", family: "x", tool: "y" }
+  { dimension: "commands", days: 30, view: "composition", metric: "share", grain: "day", family: "x", tool: "y" }
 );
 assert.equal(state.parse("?days=90").grain, "week");
 assert.deepEqual(
@@ -26,7 +26,7 @@ assert.deepEqual(
     { days: 30, view: "snapshot", metric: "calls", grain: "day", family: "wrong", tool: "Read" },
     fixture
   ),
-  { days: 30, view: "snapshot", metric: "calls", grain: "day", family: "files", tool: "Read" }
+  { dimension: "commands", days: 30, view: "snapshot", metric: "calls", grain: "day", family: "files", tool: "Read" }
 );
 assert.equal(state.normalize(
   { days: 30, view: "composition", metric: "share", grain: "day", family: "execution", tool: "Read" },
@@ -40,10 +40,14 @@ assert.equal(grouped.hidden[0].label, "tiny");
 
 const serialized = state.serialize({
   days: 90, view: "hierarchy", metric: "calls", grain: "week",
-  family: "files & more", tool: "<Read>",
+  dimension: "tools", family: "files & more", tool: "<Read>",
 });
 assert.equal(serialized.includes("<"), false);
 assert.equal(state.parse(serialized).tool, "<Read>");
+assert.equal(state.parse(serialized).dimension, "tools");
+assert.equal(state.parse("?dimension=bad").dimension, "commands");
+assert.equal(serialized.includes("name="), true);
+assert.equal(state.parse("?tool=legacy").tool, "legacy");
 assert.equal(state.shouldHandleEscape({
   key: "Escape", hasSelection: true, dialogOpen: false, defaultPrevented: false,
 }), true);

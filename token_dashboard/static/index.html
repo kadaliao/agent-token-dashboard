@@ -26,19 +26,26 @@
     <section class="explorer-band" aria-labelledby="explorer-title">
       <div class="section-heading explorer-heading">
         <div>
-          <p class="kicker">Native tool calls · tool tokens unknown</p>
-          <h2 id="explorer-title">Tool composition</h2>
+          <p class="kicker" id="explorer-kicker">Native command invocations · command tokens unknown</p>
+          <h2 id="explorer-title">Command composition</h2>
           <p id="explorer-total" class="section-total"></p>
+          <p id="command-coverage" class="coverage-note"></p>
         </div>
-        <div class="segmented" aria-label="Reporting range">
-          <button type="button" data-days="7" aria-pressed="false">7d</button>
-          <button type="button" data-days="30" class="active" aria-pressed="true">30d</button>
-          <button type="button" data-days="90" aria-pressed="false">90d</button>
+        <div class="explorer-header-controls">
+          <div class="segmented dimension-switch" aria-label="Explorer dimension">
+            <button type="button" data-dimension="commands" class="active" aria-pressed="true">Commands</button>
+            <button type="button" data-dimension="tools" aria-pressed="false">Agent tools</button>
+          </div>
+          <div class="segmented" aria-label="Reporting range">
+            <button type="button" data-days="7" aria-pressed="false">7d</button>
+            <button type="button" data-days="30" class="active" aria-pressed="true">30d</button>
+            <button type="button" data-days="90" aria-pressed="false">90d</button>
+          </div>
         </div>
       </div>
 
       <div class="view-toolbar">
-        <div class="view-tabs" role="tablist" aria-label="Tool visualization">
+        <div class="view-tabs" role="tablist" aria-label="Explorer visualization">
           <button type="button" role="tab" data-view="composition" aria-selected="true">Composition</button>
           <button type="button" role="tab" data-view="snapshot" aria-selected="false">Snapshot</button>
           <button type="button" role="tab" data-view="hierarchy" aria-selected="false">Hierarchy</button>

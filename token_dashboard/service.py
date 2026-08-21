@@ -172,9 +172,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             grain = query.get("grain", [None])[0]
             if grain not in {"day", "week"}:
                 grain = None
+            dimension = query.get("dimension", ["commands"])[0]
+            if dimension not in {"commands", "tools"}:
+                dimension = "commands"
             store = self._store()
             try:
-                self._json(store.dashboard(days, grain))
+                self._json(store.dashboard(days, grain, dimension))
             finally:
                 store.close()
             return

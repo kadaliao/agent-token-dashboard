@@ -38,7 +38,7 @@ class StorageScanTests(unittest.TestCase):
         records = [
             {"timestamp": stamp, "type": "session_meta", "payload": {"id": "native-id", "cwd": "/code/private-project"}},
             {"timestamp": stamp, "type": "response_item", "payload": {"type": "message", "content": secret}},
-            {"timestamp": stamp, "type": "response_item", "payload": {"type": "function_call", "call_id": "call-id", "name": "exec_command", "arguments": secret}},
+            {"timestamp": stamp, "type": "response_item", "payload": {"type": "function_call", "call_id": "call-id", "name": "exec_command", "arguments": json.dumps({"cmd": f"rg {secret} /private/path"})}},
             {"timestamp": stamp, "type": "turn_context", "payload": {"turn_id": "turn", "model": "test-model"}},
             {"timestamp": stamp, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": total, "last_token_usage": total}}},
         ]
@@ -60,21 +60,26 @@ class StorageScanTests(unittest.TestCase):
         try:
             status = store.status()
             dashboard = store.dashboard(30)
+            tool_dashboard = store.dashboard(30, dimension="tools")
         finally:
             store.close()
         self.assertEqual(status["sessions"], 1)
         self.assertEqual(status["turns"], 1)
         self.assertEqual(dashboard["windows"]["30d"]["total_tokens"], 125)
-        self.assertEqual(dashboard["rankings"]["native_tools"][0]["label"], "exec_command")
+        self.assertEqual(dashboard["rankings"]["native_tools"][0]["label"], "rg")
         self.assertEqual(dashboard["rankings"]["native_tools"][0]["share"], 1)
+        self.assertEqual(tool_dashboard["rankings"]["native_tools"][0]["label"], "exec_command")
         composition = dashboard["tool_composition"]
-        self.assertEqual(composition["taxonomy_version"], "2026-08-21.v1")
+        self.assertEqual(composition["taxonomy_version"], "2026-08-21.commands.v1")
         self.assertEqual(composition["grain"], "day")
         self.assertEqual(composition["total_calls"], 1)
-        execution = next(item for item in composition["families"] if item["key"] == "execution")
-        self.assertEqual(execution["calls"], 1)
-        self.assertEqual(execution["tools"][0]["label"], "exec_command")
-        self.assertEqual(execution["tools"][0]["token_precision"], "unknown")
+        search = next(item for item in composition["families"] if item["key"] == "search")
+        self.assertEqual(search["calls"], 1)
+        self.assertEqual(search["tools"][0]["label"], "rg")
+        self.assertEqual(search["tools"][0]["token_precision"], "unknown")
+        self.assertEqual(composition["coverage"]["parsed_invocations"], 1)
+        self.assertEqual(composition["coverage"]["shell_calls"], 1)
+        self.assertEqual(composition["coverage"]["unknown_shell_calls"], 0)
         self.assertEqual(len(dashboard["heatmap"]["dates"]), 30)
         self.assertEqual(dashboard["heatmap"]["scale"], "shared_log_absolute")
         tool = dashboard["heatmap"]["tools"][0]
@@ -85,6 +90,8 @@ class StorageScanTests(unittest.TestCase):
         self.assertNotIn(secret.encode(), self.database.read_bytes())
         self.assertNotIn(str(self.source).encode(), self.database.read_bytes())
         self.assertNotIn(str(self.root).encode(), self.database.read_bytes())
+        self.assertNotIn(b"rg PROMPT_CONTENT_MUST_NOT_BE_STORED", self.database.read_bytes())
+        self.assertNotIn(b"/private/path", self.database.read_bytes())
         connection = sqlite3.connect(self.database)
         try:
             source_columns = {row[1] for row in connection.execute("PRAGMA table_info(sources)")}
@@ -164,7 +171,7 @@ class StorageScanTests(unittest.TestCase):
         scan([self.target(), self.target(duplicate_root)], self.database, self.pricing)
         store = Store(self.database)
         try:
-            tool = store.dashboard(30)["heatmap"]["tools"][0]
+            tool = store.dashboard(30, dimension="tools")["heatmap"]["tools"][0]
         finally:
             store.close()
         self.assertEqual(tool["label"], "exec_command")
@@ -213,7 +220,7 @@ class StorageScanTests(unittest.TestCase):
         )
         store = Store(self.database)
         try:
-            dashboard = store.dashboard(7)
+            dashboard = store.dashboard(7, dimension="tools")
         finally:
             store.close()
         tools = {item["label"]: item for item in dashboard["heatmap"]["tools"]}
@@ -229,7 +236,7 @@ class StorageScanTests(unittest.TestCase):
         scan([self.target(missing, "claude")], self.database, self.pricing)
         store = Store(self.database)
         try:
-            tools = store.dashboard(7)["heatmap"]["tools"]
+            tools = store.dashboard(7, dimension="tools")["heatmap"]["tools"]
         finally:
             store.close()
         self.assertEqual(tools, [])
@@ -249,9 +256,9 @@ class StorageScanTests(unittest.TestCase):
         scan([self.target()], self.database, self.pricing)
         store = Store(self.database)
         try:
-            composition = store.dashboard(30)["tool_composition"]
-            weekly = store.dashboard(90)["tool_composition"]
-            forced_daily = store.dashboard(90, "day")["tool_composition"]
+            composition = store.dashboard(30, dimension="tools")["tool_composition"]
+            weekly = store.dashboard(90, dimension="tools")["tool_composition"]
+            forced_daily = store.dashboard(90, "day", "tools")["tool_composition"]
         finally:
             store.close()
 
@@ -301,6 +308,85 @@ class StorageScanTests(unittest.TestCase):
             connection.close()
         self.assertEqual(columns & {"path", "root"}, set())
         self.assertIn("source_key", columns)
+
+    def test_command_dimension_one_call_many_dedup_and_conservation(self):
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        record = {
+            "timestamp": stamp, "type": "response_item", "payload": {
+                "type": "function_call", "call_id": "shared-shell-call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": "rg x | head && git status; find . -type f"}),
+            },
+        }
+        (self.source / "commands.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        duplicate = self.root / "duplicate-commands"
+        duplicate.mkdir()
+        (duplicate / "copy.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        scan([self.target(), self.target(duplicate)], self.database, self.pricing)
+        store = Store(self.database)
+        try:
+            daily = store.dashboard(30, dimension="commands")
+            weekly = store.dashboard(90, "week", "commands")
+            tools = store.dashboard(30, dimension="tools")
+            status = store.status()
+        finally:
+            store.close()
+        self.assertEqual(
+            {item["label"] for item in daily["rankings"]["explorer"]},
+            {"rg", "head", "git", "find"},
+        )
+        self.assertEqual(daily["tool_composition"]["total_calls"], 4)
+        self.assertEqual(tools["tool_composition"]["total_calls"], 1)
+        self.assertEqual(status["command_invocations"], 4)
+        self.assertEqual(daily["tool_composition"]["coverage"]["shell_calls"], 1)
+        self.assertEqual(daily["tool_composition"]["coverage"]["unknown_invocations"], 0)
+        self.assertEqual(sum(item["calls"] for item in daily["tool_composition"]["families"]), 4)
+        self.assertEqual(sum(item["calls"] for item in daily["tool_composition"]["totals_by_period"]), 4)
+        self.assertEqual(weekly["tool_composition"]["grain"], "week")
+
+    def test_command_unknown_coverage_counts_shell_parents_not_all_tools(self):
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        records = [
+            {"timestamp": stamp, "type": "response_item", "payload": {
+                "type": "function_call", "call_id": "read", "name": "Read", "arguments": "{}"}},
+            {"timestamp": stamp, "type": "response_item", "payload": {
+                "type": "function_call", "call_id": "bad", "name": "exec_command", "arguments": "not-json"}},
+        ]
+        (self.source / "coverage.jsonl").write_text(
+            "".join(json.dumps(item) + "\n" for item in records), encoding="utf-8"
+        )
+        scan([self.target()], self.database, self.pricing)
+        store = Store(self.database)
+        try:
+            coverage = store.dashboard(30)["tool_composition"]["coverage"]
+        finally:
+            store.close()
+        self.assertEqual(coverage, {
+            "shell_calls": 1, "parsed_invocations": 0,
+            "unknown_invocations": 1, "unknown_shell_calls": 1,
+        })
+
+    def test_pre_command_schema_is_rebuilt_for_adapter_rescan(self):
+        old = self.root / "old.sqlite3"
+        connection = sqlite3.connect(old)
+        connection.execute(
+            "CREATE TABLE sources(source_key TEXT PRIMARY KEY, adapter TEXT, root_key TEXT, size INTEGER, mtime_ns INTEGER, status TEXT, parse_errors INTEGER, adapter_version INTEGER, scanned_at TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE sessions(public_id TEXT PRIMARY KEY, source_key TEXT, tool TEXT, project TEXT, model TEXT, started_at TEXT, ended_at TEXT, parse_errors INTEGER, precision TEXT)"
+        )
+        connection.execute("CREATE TABLE turns(event_key TEXT)")
+        connection.execute("CREATE TABLE tool_calls(event_key TEXT)")
+        connection.commit()
+        connection.close()
+        store = Store(old)
+        try:
+            table = store.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='command_invocations'"
+            ).fetchone()
+        finally:
+            store.close()
+        self.assertIsNotNone(table)
 
 
 if __name__ == "__main__":

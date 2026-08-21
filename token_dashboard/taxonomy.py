@@ -4,6 +4,7 @@ from typing import Final
 
 
 TAXONOMY_VERSION: Final = "2026-08-21.v1"
+COMMAND_TAXONOMY_VERSION: Final = "2026-08-21.commands.v1"
 
 FAMILIES: Final = (
     {"key": "execution", "label": "Execution", "color": "#F59E42"},
@@ -93,3 +94,35 @@ TOOL_FAMILY: Final = {
 
 def family_for_tool(tool_name: str) -> str:
     return TOOL_FAMILY.get(tool_name, "unmapped")
+
+
+COMMAND_FAMILIES: Final = (
+    {"key": "files", "label": "Files", "color": "#73A9E8"},
+    {"key": "search", "label": "Search", "color": "#F59E42"},
+    {"key": "version-control", "label": "Version control", "color": "#59B8A8"},
+    {"key": "build-test", "label": "Build & test", "color": "#E56B5D"},
+    {"key": "system", "label": "System", "color": "#A68BE8"},
+    {"key": "shell", "label": "Shell", "color": "#D2A85A"},
+    {"key": "network", "label": "Network", "color": "#4FA7B8"},
+    {"key": "other", "label": "Other", "color": "#CBD2CC"},
+    {"key": "unknown", "label": "Unknown", "color": "#747D77"},
+)
+
+COMMAND_FAMILY: Final = {
+    "cat": "files", "cp": "files", "ls": "files", "mkdir": "files", "mv": "files",
+    "rm": "files", "sed": "files", "tail": "files", "head": "files", "touch": "files",
+    "wc": "files", "find": "search", "grep": "search", "rg": "search", "fd": "search",
+    "git": "version-control", "gh": "version-control",
+    "cargo": "build-test", "go": "build-test", "make": "build-test", "npm": "build-test",
+    "npx": "build-test", "pnpm": "build-test", "pytest": "build-test", "python": "build-test",
+    "python3": "build-test", "node": "build-test", "yarn": "build-test",
+    "date": "system", "df": "system", "du": "system", "kill": "system", "ps": "system",
+    "pwd": "system", "uname": "system", "which": "system", "tmux": "system",
+    "bash": "shell", "sh": "shell", "xargs": "shell", "zsh": "shell",
+    "curl": "network", "dig": "network", "nc": "network", "ping": "network",
+    "ssh": "network", "wget": "network", "unknown": "unknown",
+}
+
+
+def family_for_command(command_name: str) -> str:
+    return COMMAND_FAMILY.get(command_name, "other")

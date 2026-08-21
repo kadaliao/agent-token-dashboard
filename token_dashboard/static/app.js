@@ -67,6 +67,22 @@ function composition() {
   return state.dashboard.tool_composition;
 }
 
+function terms() {
+  return state.dimension === "commands"
+    ? { singular: "command", plural: "commands", native: "native command invocations" }
+    : { singular: "agent tool", plural: "agent tools", native: "native agent tool calls" };
+}
+
+function stableLongTail(items, total) {
+  const grouped = DashboardState.stableLongTail(items, total);
+  if (state.dimension === "commands") {
+    grouped.visible.forEach(item => {
+      if (item.aggregate) item.label = item.label.replace("Other tools", "Other commands");
+    });
+  }
+  return grouped;
+}
+
 function familyByKey(key) {
   return composition().families.find(family => family.key === key);
 }
@@ -84,6 +100,11 @@ function writeUrl() {
 }
 
 function syncControls() {
+  document.querySelectorAll("[data-dimension]").forEach(button => {
+    const active = button.dataset.dimension === state.dimension;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
   document.querySelectorAll("[data-days]").forEach(button => {
     const active = Number(button.dataset.days) === state.days;
     button.classList.toggle("active", active);
@@ -153,7 +174,7 @@ function selectionRows() {
   if (state.family) {
     const family = familyByKey(state.family);
     if (!family) return [];
-    return DashboardState.stableLongTail(family.tools, composition().total_calls).visible.map((tool, index) => ({
+    return stableLongTail(family.tools, composition().total_calls).visible.map((tool, index) => ({
       ...tool,
       color: tool.aggregate ? "#8F9891" : family.color,
       opacity: tool.aggregate ? 1 : Math.max(.38, 1 - index * .07),
@@ -168,12 +189,12 @@ function selectionRows() {
 function markLabel(row, period, calls, total, visualTotal = total) {
   const share = total ? calls / total : 0;
   const context = visualTotal !== total ? `; ${formatPercent(visualTotal ? calls / visualTotal : 0)} within selection` : "";
-  return `${row.label}, ${formatPeriod(period.label, composition().grain)}: ${calls.toLocaleString()} native calls, ${formatPercent(share)} of ${total.toLocaleString()} period calls${context}; tool tokens unknown`;
+  return `${row.label}, ${formatPeriod(period.label, composition().grain)}: ${calls.toLocaleString()} ${terms().native}, ${formatPercent(share)} of ${total.toLocaleString()} period calls${context}; ${terms().singular} tokens unknown`;
 }
 
 function activateRow(row) {
   if (row.aggregate) {
-    document.getElementById("chart-focus").textContent = `${row.label}: ${row.calls.toLocaleString()} calls. Complete tools remain available in the exact ranking.`;
+    document.getElementById("chart-focus").textContent = `${row.label}: ${row.calls.toLocaleString()} calls. Complete ${terms().plural} remain available in the exact ranking.`;
   } else if (state.family || row.family !== row.key) {
     setTool(row.family, row.label);
   } else {
@@ -198,7 +219,7 @@ function renderComposition() {
   const periodWidth = plotWidth / Math.max(periods.length, 1);
   const svg = svgNode("svg", {
     class: "composition-chart", viewBox: `0 0 ${width} ${height}`, width,
-    height, role: "group", "aria-label": `Tool composition by ${data.grain}`
+    height, role: "group", "aria-label": `${terms().singular} composition by ${data.grain}`
   });
   root.append(svg);
 
@@ -316,13 +337,13 @@ function renderTreemap() {
   const height = 470;
   const svg = svgNode("svg", {
     class: "treemap-chart", viewBox: `0 0 ${width} ${height}`,
-    role: "group", "aria-label": "Nested treemap of native tool calls"
+    role: "group", "aria-label": `Nested treemap of ${terms().native}`
   });
   root.append(svg);
   let topItems;
   if (state.family) {
     const family = familyByKey(state.family);
-    topItems = family ? DashboardState.stableLongTail(family.tools, composition().total_calls).visible
+    topItems = family ? stableLongTail(family.tools, composition().total_calls).visible
       .map(tool => ({ ...tool, family: family.key, color: tool.aggregate ? "#8F9891" : family.color })) : [];
   } else {
     topItems = composition().families.filter(item => item.calls > 0).map(family => ({ ...family, family: family.key }));
@@ -338,26 +359,26 @@ function renderTreemap() {
       fill: row.color || "#8F9891", "fill-opacity": state.family ? Math.max(.35, 1 - index * .05) : .25,
       class: `chart-mark${state.tool === row.label || state.family === row.key ? " selected" : ""}`,
       role: "button", tabindex: 0,
-      "aria-label": `${row.label}: ${row.calls.toLocaleString()} native calls, ${formatPercent(row.calls / composition().total_calls)} of selected range; tool tokens unknown`
+      "aria-label": `${row.label}: ${row.calls.toLocaleString()} ${terms().native}, ${formatPercent(row.calls / composition().total_calls)} of selected range; ${terms().singular} tokens unknown`
     });
     const activate = () => row.aggregate
-      ? document.getElementById("chart-focus").textContent = `${row.label}: ${row.calls.toLocaleString()} calls. Complete raw tools are listed alongside the chart.`
+      ? document.getElementById("chart-focus").textContent = `${row.label}: ${row.calls.toLocaleString()} calls. Complete ${terms().plural} are listed alongside the chart.`
       : state.family ? setTool(state.family, row.label) : setFamily(row.key);
     bindMark(outer, activate);
     group.append(outer);
     const canNest = !mobile && !state.family && row.tools?.length && entry.width > 120 && entry.height > 90;
     if (canNest) {
-      const childRows = DashboardState.stableLongTail(row.tools, composition().total_calls).visible;
+      const childRows = stableLongTail(row.tools, composition().total_calls).visible;
       const children = layoutSlice(childRows, entry.x + 8, entry.y + 31, Math.max(entry.width - 16, 0), Math.max(entry.height - 39, 0), entry.height > entry.width);
       children.forEach((child, childIndex) => {
         const childRect = svgNode("rect", {
           x: child.x + 1, y: child.y + 1, width: Math.max(child.width - 2, 0), height: Math.max(child.height - 2, 0),
           fill: row.color, "fill-opacity": Math.max(.35, .92 - childIndex * .06),
           class: "chart-mark", role: "button", tabindex: 0,
-          "aria-label": `${child.item.label}, ${row.label}: ${child.item.calls.toLocaleString()} native calls, ${formatPercent(child.item.share)} of selected range; tool tokens unknown`
+          "aria-label": `${child.item.label}, ${row.label}: ${child.item.calls.toLocaleString()} ${terms().native}, ${formatPercent(child.item.share)} of selected range; ${terms().singular} tokens unknown`
         });
         bindMark(childRect, () => child.item.aggregate
-          ? document.getElementById("chart-focus").textContent = `${child.item.label}: ${child.item.calls.toLocaleString()} calls. Complete raw tools are listed alongside the chart.`
+          ? document.getElementById("chart-focus").textContent = `${child.item.label}: ${child.item.calls.toLocaleString()} calls. Complete ${terms().plural} are listed alongside the chart.`
           : setTool(row.key, child.item.label));
         group.append(childRect);
         if (child.width > 92 && child.height > 34) {
@@ -415,13 +436,13 @@ function renderSunburst() {
   const cy = 235;
   const svg = svgNode("svg", {
     class: "sunburst-chart", viewBox: `0 0 ${width} ${height}`,
-    role: "group", "aria-label": "Tool family hierarchy by native call share"
+    role: "group", "aria-label": `${terms().singular} family hierarchy by native call share`
   });
   root.append(svg);
   let ringItems;
   if (state.family) {
     const family = familyByKey(state.family);
-    ringItems = DashboardState.stableLongTail(family?.tools || [], composition().total_calls).visible
+    ringItems = stableLongTail(family?.tools || [], composition().total_calls).visible
       .map(tool => ({ ...tool, family: state.family, color: tool.aggregate ? "#8F9891" : family.color }));
   } else {
     ringItems = composition().families.filter(item => item.calls > 0).map(family => ({ ...family, family: family.key }));
@@ -435,15 +456,15 @@ function renderSunburst() {
       fill: row.color || "#8F9891", "fill-opacity": state.family ? Math.max(.38, 1 - index * .045) : .9,
       class: `chart-mark${state.tool === row.label || state.family === row.key ? " selected" : ""}`,
       role: "button", tabindex: 0,
-      "aria-label": `${row.label}: ${row.calls.toLocaleString()} native calls, ${formatPercent(row.calls / composition().total_calls)} of selected range; tool tokens unknown`
+      "aria-label": `${row.label}: ${row.calls.toLocaleString()} ${terms().native}, ${formatPercent(row.calls / composition().total_calls)} of selected range; ${terms().singular} tokens unknown`
     });
     bindMark(path, () => row.aggregate
-      ? document.getElementById("chart-focus").textContent = `${row.label}: ${row.calls.toLocaleString()} calls. Complete raw tools are listed in the tree.`
+      ? document.getElementById("chart-focus").textContent = `${row.label}: ${row.calls.toLocaleString()} calls. Complete ${terms().plural} are listed in the tree.`
       : state.family ? setTool(state.family, row.label) : setFamily(row.key));
     svg.append(path);
     if (!mobile && !state.family && row.tools?.length) {
       let childAngle = angle;
-      DashboardState.stableLongTail(row.tools, composition().total_calls).visible.forEach((tool, childIndex) => {
+      stableLongTail(row.tools, composition().total_calls).visible.forEach((tool, childIndex) => {
         const childEnd = childAngle + (end - angle) * (tool.calls / row.calls);
         if (childEnd - childAngle > .007) {
           const child = svgNode("path", {
@@ -451,10 +472,10 @@ function renderSunburst() {
             fill: row.color, "fill-opacity": Math.max(.3, .86 - childIndex * .045),
             class: `chart-mark${state.tool === tool.label ? " selected" : ""}`,
             role: "button", tabindex: 0,
-            "aria-label": `${tool.label}, ${row.label}: ${tool.calls.toLocaleString()} native calls, ${formatPercent(tool.share)} of selected range; tool tokens unknown`
+            "aria-label": `${tool.label}, ${row.label}: ${tool.calls.toLocaleString()} ${terms().native}, ${formatPercent(tool.share)} of selected range; ${terms().singular} tokens unknown`
           });
           bindMark(child, () => tool.aggregate
-            ? document.getElementById("chart-focus").textContent = `${tool.label}: ${tool.calls.toLocaleString()} calls. Complete raw tools are listed in the tree.`
+            ? document.getElementById("chart-focus").textContent = `${tool.label}: ${tool.calls.toLocaleString()} calls. Complete ${terms().plural} are listed in the tree.`
             : setTool(row.key, tool.label));
           svg.append(child);
         }
@@ -491,7 +512,7 @@ function renderActivity() {
   target.style.gridTemplateColumns = `minmax(190px, 240px) repeat(${source.dates.length}, 28px)`;
   target.setAttribute("aria-rowcount", String(tools.length + 1));
   target.setAttribute("aria-colcount", String(source.dates.length + 1));
-  const corner = make("div", "heat-corner", "Calls / share / tool tokens");
+  const corner = make("div", "heat-corner", `Calls / share / ${terms().singular} tokens`);
   corner.setAttribute("role", "columnheader");
   target.append(corner);
   source.dates.forEach((date, index) => {
@@ -516,7 +537,7 @@ function renderActivity() {
       const node = make("div", "heat-cell");
       node.setAttribute("role", "gridcell");
       node.tabIndex = 0;
-      const label = `${tool.label}, ${cell.date}: ${cell.calls.toLocaleString()} native calls; tool token attribution unknown`;
+      const label = `${tool.label}, ${cell.date}: ${cell.calls.toLocaleString()} ${terms().native}; ${terms().singular} token attribution unknown`;
       node.setAttribute("aria-label", label);
       node.title = label;
       node.addEventListener("focus", () => { document.getElementById("chart-focus").textContent = label; });
@@ -557,7 +578,7 @@ function renderToolRanking() {
   else target.removeAttribute("role");
   const items = rankingItems();
   const max = Math.max(...items.map(item => item.calls), 1);
-  document.getElementById("tool-ranking-title").textContent = state.family ? "Raw tools" : "Tool families";
+  document.getElementById("tool-ranking-title").textContent = state.family ? `Exact ${terms().plural}` : `${terms().singular[0].toUpperCase()}${terms().singular.slice(1)} families`;
   items.forEach(item => {
     const isTool = Boolean(state.family);
     const row = make("button", `rank-row tool-rank${state.tool === item.label || state.family === item.key ? " selected" : ""}`);
@@ -580,7 +601,7 @@ function renderToolRanking() {
     row.addEventListener("click", () => isTool ? setTool(state.family, item.label) : setFamily(item.key));
     target.append(row);
   });
-  if (!items.length) target.append(make("p", "unknown", "No native tool calls in this range"));
+  if (!items.length) target.append(make("p", "unknown", `No ${terms().native} in this range`));
 }
 
 function renderCompositionTable() {
@@ -598,7 +619,7 @@ function renderCompositionTable() {
   }
   const head = document.createElement("thead");
   const headRow = document.createElement("tr");
-  headRow.append(make("th", "", state.tool ? "Tool" : "Family"));
+  headRow.append(make("th", "", state.tool ? terms().singular : "Family"));
   data.totals_by_period.forEach(period => headRow.append(make("th", "", formatPeriod(period.label, data.grain))));
   headRow.append(make("th", "", "Range total"));
   head.append(headRow);
@@ -621,14 +642,19 @@ function renderExplorer() {
   syncControls();
   document.getElementById("chart-focus").textContent = "Focus a chart mark for exact calls and share.";
   const titles = {
-    composition: ["Tool composition", "100% structure over time, with aligned absolute call volume"],
-    snapshot: ["Usage snapshot", "Nested area shows family and raw tool share for the selected range"],
-    hierarchy: ["Tool hierarchy", "Family to raw tool structure; use the center or Escape to return"],
-    activity: ["Tool call activity", "Raw tool x local day on a shared absolute log scale"],
+    composition: [`${terms().singular[0].toUpperCase()}${terms().singular.slice(1)} composition`, "100% structure over time, with aligned absolute call volume"],
+    snapshot: ["Usage snapshot", `Nested area shows family and exact ${terms().singular} share for the selected range`],
+    hierarchy: [`${terms().singular[0].toUpperCase()}${terms().singular.slice(1)} hierarchy`, `Family to exact ${terms().singular} structure; use the center or Escape to return`],
+    activity: [`${terms().singular[0].toUpperCase()}${terms().singular.slice(1)} activity`, `Exact ${terms().singular} x local day on a shared absolute log scale`],
   };
+  document.getElementById("explorer-kicker").textContent = `${terms().native} · ${terms().singular} tokens unknown`;
   document.getElementById("explorer-title").textContent = titles[state.view][0];
   document.getElementById("explorer-total").textContent =
-    `${composition().total_calls.toLocaleString()} native calls · ${state.dashboard.heatmap.tools.length} raw tools · ${titles[state.view][1]}`;
+    `${composition().total_calls.toLocaleString()} ${terms().native} · ${state.dashboard.heatmap.tools.length} exact ${terms().plural} · ${titles[state.view][1]}`;
+  const coverage = composition().coverage;
+  document.getElementById("command-coverage").textContent = coverage
+    ? `${coverage.parsed_invocations.toLocaleString()} parsed invocations · ${coverage.unknown_invocations.toLocaleString()} unknown · ${coverage.shell_calls.toLocaleString()} shell calls`
+    : "Each event is one deduplicated native agent tool call.";
   document.getElementById("taxonomy-version").textContent = composition().taxonomy_version;
   document.getElementById("chart-root").className = `chart-root ${state.view}`;
   if (state.view === "composition") renderComposition();
@@ -799,7 +825,7 @@ function render(data) {
 }
 
 async function refresh() {
-  const query = new URLSearchParams({ days: String(state.days), grain: state.grain });
+  const query = new URLSearchParams({ days: String(state.days), grain: state.grain, dimension: state.dimension });
   const [dashboard, status] = await Promise.all([
     api(`/api/dashboard?${query}`), api("/api/status")
   ]);
@@ -842,6 +868,14 @@ document.getElementById("family-filter").addEventListener("click", () => {
   renderExplorer();
 });
 document.getElementById("tool-filter").addEventListener("click", stepBack);
+document.querySelectorAll("[data-dimension]").forEach(button => button.addEventListener("click", async () => {
+  if (button.dataset.dimension === state.dimension) return;
+  state.dimension = button.dataset.dimension;
+  state.family = null;
+  state.tool = null;
+  writeUrl();
+  await refresh();
+}));
 document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => {
   state.view = button.dataset.view;
   writeUrl();
@@ -889,7 +923,7 @@ document.addEventListener("keydown", event => {
 });
 window.addEventListener("popstate", async () => {
   const next = DashboardState.parse(window.location.search);
-  const reload = next.days !== state.days || next.grain !== state.grain;
+  const reload = next.days !== state.days || next.grain !== state.grain || next.dimension !== state.dimension;
   Object.assign(state, next);
   state.grainExplicit = new URLSearchParams(window.location.search).has("grain");
   if (reload) await refresh();

@@ -8,7 +8,14 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .scanner import COUNTERS, ParsedSession
-from .taxonomy import FAMILIES, TAXONOMY_VERSION, family_for_tool
+from .taxonomy import (
+    COMMAND_FAMILIES,
+    COMMAND_TAXONOMY_VERSION,
+    FAMILIES,
+    TAXONOMY_VERSION,
+    family_for_command,
+    family_for_tool,
+)
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -75,6 +82,18 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_event ON tool_calls(event_key);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_occurred ON tool_calls(occurred_at);
+CREATE TABLE IF NOT EXISTS command_invocations (
+    session_id TEXT NOT NULL REFERENCES sessions(public_id) ON DELETE CASCADE,
+    event_key TEXT NOT NULL,
+    parent_event_key TEXT NOT NULL,
+    command_name TEXT NOT NULL,
+    occurred_at TEXT,
+    outer_tool TEXT NOT NULL,
+    PRIMARY KEY (session_id, event_key)
+);
+CREATE INDEX IF NOT EXISTS idx_commands_event ON command_invocations(event_key);
+CREATE INDEX IF NOT EXISTS idx_commands_parent ON command_invocations(parent_event_key);
+CREATE INDEX IF NOT EXISTS idx_commands_occurred ON command_invocations(occurred_at);
 CREATE TABLE IF NOT EXISTS scan_roots (
     adapter TEXT NOT NULL,
     root_key TEXT NOT NULL,
@@ -120,6 +139,7 @@ def _remove_legacy_database(path: Path) -> None:
             or "tool" not in session_columns
             or "event_key" not in turn_columns
             or not probe.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_calls'").fetchone()
+            or not probe.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='command_invocations'").fetchone()
         )
     finally:
         probe.close()
@@ -232,6 +252,21 @@ class Store:
                 ],
             )
             self.connection.executemany(
+                """INSERT INTO command_invocations(session_id, event_key, parent_event_key,
+                   command_name, occurred_at, outer_tool) VALUES (?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        session.public_id,
+                        invocation.event_key,
+                        invocation.parent_event_key,
+                        invocation.command_name,
+                        invocation.occurred_at,
+                        invocation.outer_tool,
+                    )
+                    for invocation in session.command_invocations
+                ],
+            )
+            self.connection.executemany(
                 """INSERT INTO tool_calls(session_id, event_key, tool_name, occurred_at, token_count, token_precision)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 [
@@ -296,6 +331,9 @@ class Store:
         sessions = self.connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         turns = self.connection.execute("SELECT COUNT(DISTINCT event_key) FROM turns").fetchone()[0]
         calls = self.connection.execute("SELECT COUNT(DISTINCT event_key) FROM tool_calls").fetchone()[0]
+        commands = self.connection.execute(
+            "SELECT COUNT(DISTINCT event_key) FROM command_invocations"
+        ).fetchone()[0]
         tool_rows = self.connection.execute(
             """SELECT adapter, status, discovered, failed, scanned_at
                FROM scan_roots ORDER BY adapter"""
@@ -306,9 +344,10 @@ class Store:
             "sessions": sessions,
             "turns": turns,
             "tool_calls": calls,
+            "command_invocations": commands,
             "last_scan": row["last_scan"],
             "tools": [dict(item) for item in tool_rows],
-            "storage": "numeric usage metadata only",
+            "storage": "derived metadata only; no raw command, arguments, paths, or log text",
         }
 
     def _turn_rows(self, earliest: datetime) -> list[sqlite3.Row]:
@@ -338,6 +377,15 @@ class Store:
         ).fetchall()
         # A client may persist a transcript in more than one root. The native call
         # id hash survives that duplication, so retain a single event without raw ids.
+        return list({row["event_key"]: row for row in rows}.values())
+
+    def _command_rows(self, earliest: datetime) -> list[sqlite3.Row]:
+        rows = self.connection.execute(
+            """SELECT c.*, NULL AS token_count, 'unknown' AS token_precision
+               FROM command_invocations c
+               WHERE c.occurred_at >= ? ORDER BY c.occurred_at ASC""",
+            (earliest.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),),
+        ).fetchall()
         return list({row["event_key"]: row for row in rows}.values())
 
     @staticmethod
@@ -397,7 +445,10 @@ class Store:
             },
         }
 
-    def dashboard(self, days: int = 30, grain: str | None = None) -> dict[str, Any]:
+    def dashboard(
+        self, days: int = 30, grain: str | None = None, dimension: str = "commands"
+    ) -> dict[str, Any]:
+        dimension = dimension if dimension in {"commands", "tools"} else "commands"
         now_local = datetime.now().astimezone()
         today = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
         earliest = today - timedelta(days=max(days, 30) - 1)
@@ -414,8 +465,16 @@ class Store:
         }
         filtered = [row for row in rows if in_window(row, days)]
         calls = self._tool_call_rows(earliest)
+        command_rows = self._command_rows(earliest)
+        selected_rows = command_rows if dimension == "commands" else calls
+        name_field = "command_name" if dimension == "commands" else "tool_name"
+        families = COMMAND_FAMILIES if dimension == "commands" else FAMILIES
+        taxonomy_version = (
+            COMMAND_TAXONOMY_VERSION if dimension == "commands" else TAXONOMY_VERSION
+        )
+        family_for_name = family_for_command if dimension == "commands" else family_for_tool
         filtered_calls = [
-            row for row in calls
+            row for row in selected_rows
             if (stamp := _parse_time(row["occurred_at"])) and stamp.astimezone() >= today - timedelta(days=days - 1)
         ]
 
@@ -492,10 +551,10 @@ class Store:
         for row in filtered_calls:
             stamp = _parse_time(row["occurred_at"])
             if stamp:
-                call_date_groups[(row["tool_name"], stamp.astimezone().date().isoformat())].append(row)
+                call_date_groups[(row[name_field], stamp.astimezone().date().isoformat())].append(row)
         call_groups: dict[str, list[sqlite3.Row]] = defaultdict(list)
         for row in filtered_calls:
-            call_groups[row["tool_name"]].append(row)
+            call_groups[row[name_field]].append(row)
         range_calls = self._aggregate_calls(filtered_calls)
         max_calls = 0
         native_tool_rows = []
@@ -547,12 +606,12 @@ class Store:
             period = date_period.get(date)
             if not period:
                 continue
-            family = family_for_tool(row["tool_name"])
+            family = family_for_name(row[name_field])
             period_call_groups[period].append(row)
             family_call_groups[family].append(row)
             family_period_groups[(family, period)].append(row)
-            family_tool_groups[(family, row["tool_name"])].append(row)
-            family_tool_period_groups[(family, row["tool_name"], period)].append(row)
+            family_tool_groups[(family, row[name_field])].append(row)
+            family_tool_period_groups[(family, row[name_field], period)].append(row)
 
         totals_by_period = []
         for period in period_keys:
@@ -565,7 +624,7 @@ class Store:
 
         family_rows = []
         total_native_calls = len(filtered_calls)
-        for definition in FAMILIES:
+        for definition in families:
             key = definition["key"]
             family_calls = len(family_call_groups[key])
             tool_names = sorted(
@@ -617,13 +676,31 @@ class Store:
             })
 
         tool_composition = {
+            "dimension": dimension,
             "grain": composition_grain,
-            "taxonomy_version": TAXONOMY_VERSION,
+            "taxonomy_version": taxonomy_version,
             "total_calls": total_native_calls,
             "totals_by_period": totals_by_period,
             "families": family_rows,
             "unmapped_calls": len(family_call_groups["unmapped"]),
             "token_precision": "unknown",
+            "coverage": (
+                {
+                    "shell_calls": len({row["parent_event_key"] for row in filtered_calls}),
+                    "parsed_invocations": sum(
+                        row["command_name"] != "unknown" for row in filtered_calls
+                    ),
+                    "unknown_invocations": sum(
+                        row["command_name"] == "unknown" for row in filtered_calls
+                    ),
+                    "unknown_shell_calls": len({
+                        row["parent_event_key"] for row in filtered_calls
+                        if row["command_name"] == "unknown"
+                    }),
+                }
+                if dimension == "commands"
+                else None
+            ),
         }
 
         def rank(key: str, limit: int = 10) -> list[dict[str, Any]]:
@@ -658,6 +735,7 @@ class Store:
             "generated_at": _now(),
             "timezone": str(now_local.tzinfo),
             "range_days": days,
+            "dimension": dimension,
             "windows": windows,
             "range": range_summary,
             "heatmap": {
@@ -667,16 +745,30 @@ class Store:
                 "tools": native_tool_rows,
             },
             "tool_composition": tool_composition,
+            "explorer": {
+                "dimension": dimension,
+                "taxonomy_version": taxonomy_version,
+                "composition": tool_composition,
+                "heatmap": {
+                    "dates": dates,
+                    "max_calls": max_calls,
+                    "scale": "shared_log_absolute",
+                    "items": native_tool_rows,
+                },
+                "ranking": native_tool_rows,
+                "coverage": tool_composition["coverage"],
+            },
             "rankings": {
                 "native_tools": native_tool_rows,
+                "explorer": native_tool_rows,
                 "clients": tool_rows,
                 "models": rank("model"),
                 "projects": rank("project"),
                 "sessions": session_rank[:20],
             },
             "provenance": {
-                "adapters": "Native call names from Codex response items and Claude Code tool-use blocks; client and project are secondary dimensions",
-                "source": "Call identity/name/timestamp only; Codex token snapshots and Claude message usage remain session-level",
+                "adapters": "Native agent tool calls plus privacy-safe command basenames parsed from explicit shell payload schemas; client and project are secondary dimensions",
+                "source": "Command name/time/outer tool and hashed identity only; Codex token snapshots and Claude message usage remain session-level",
                 "precision": "Per-tool tokens are native only when a log directly attributes them; estimated only when a local tokenizer is explicitly used; otherwise unknown. This build does not distribute turn tokens to calls.",
                 "privacy": "no prompt, response, code, tool arguments, tool results, paths, or log text stored or returned",
                 "dimensions": "Claude input includes uncached, cache creation, and cache read; Claude reasoning is unavailable and remains unknown",

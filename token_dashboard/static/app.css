@@ -81,6 +81,8 @@ main { max-width: 1680px; margin: 0 auto; padding: 18px clamp(14px, 3.5vw, 46px)
   box-shadow: inset 3px 0 0 var(--amber);
 }
 .explorer-heading { align-items: center; }
+.explorer-header-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.coverage-note { margin: 6px 0 0; color: var(--muted); font-size: .78rem; }
 .segmented { display: inline-flex; padding: 2px; background: #0f1210; border: 1px solid var(--line); border-radius: 4px; }
 .segmented button { min-width: 45px; height: 30px; padding: 0 9px; border: 0; border-radius: 2px; color: var(--zinc); background: transparent; cursor: pointer; }
 .segmented button.active { color: #111411; background: var(--chalk); }
@@ -297,6 +299,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .72); }
 }
 
 @media (max-width: 599px) {
+  .explorer-header-controls { justify-content: flex-start; width: 100%; }
   h1 { font-size: 21px; }
   h2 { font-size: 17px; }
   .topbar { min-height: 92px; align-items: flex-start; padding: 14px 13px; }

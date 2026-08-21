@@ -79,13 +79,33 @@ class ScannerTests(unittest.TestCase):
 
     def test_codex_collects_native_call_name_without_arguments_or_turn_token_split(self):
         path = self.write_log([
-            record("response_item", {"type": "function_call", "call_id": "call-native", "name": "exec_command", "arguments": "PRIVATE_ARGUMENT"}),
+            record("response_item", {"type": "function_call", "call_id": "call-native", "name": "exec_command", "arguments": json.dumps({"cmd": "rg PRIVATE_ARGUMENT | head"})}),
             record("response_item", {"type": "custom_tool_call", "call_id": "call-custom", "name": "Grab", "input": "PRIVATE_INPUT"}),
             record("event_msg", {"type": "token_count", "info": {"total_token_usage": usage(10, 0, 2, 0), "last_token_usage": usage(10, 0, 2, 0)}}),
         ])
         parsed = parse_codex_file(path, self.pricing)
         self.assertEqual([call.name for call in parsed.tool_calls], ["exec_command", "Grab"])
         self.assertTrue(all(call.token_count is None and call.token_precision == "unknown" for call in parsed.tool_calls))
+        self.assertEqual(
+            [item.command_name for item in parsed.command_invocations], ["rg", "head"]
+        )
+
+    def test_codex_invalid_arguments_do_not_fall_back_to_raw_string(self):
+        path = self.write_log([
+            record("response_item", {"type": "function_call", "call_id": "bad", "name": "exec_command", "arguments": "rg PRIVATE_PATH"}),
+        ])
+        parsed = parse_codex_file(path, self.pricing)
+        self.assertEqual([item.command_name for item in parsed.command_invocations], ["unknown"])
+
+    def test_codex_custom_exec_parses_javascript_orchestration_not_js_as_shell(self):
+        path = self.write_log([
+            record("response_item", {
+                "type": "custom_tool_call", "call_id": "exec-js", "name": "exec",
+                "input": "const result = await tools.exec_command({cmd: 'rg x | head'}); await tools.wait({cell_id: 'x'});",
+            }),
+        ])
+        parsed = parse_codex_file(path, self.pricing)
+        self.assertEqual([item.command_name for item in parsed.command_invocations], ["rg", "head"])
 
     def test_missing_call_ids_do_not_merge_same_name_and_timestamp(self):
         path = self.write_log([
@@ -140,6 +160,16 @@ class ScannerTests(unittest.TestCase):
         parsed = parse_claude_file(path, self.pricing)
         self.assertEqual([call.name for call in parsed.tool_calls], ["Read"])
         self.assertEqual(parsed.tool_calls[0].token_precision, "unknown")
+
+    def test_claude_bash_reads_only_structured_command_field(self):
+        path = self.write_log([{
+            "type": "assistant", "timestamp": "2026-08-20T02:00:00Z",
+            "message": {"id": "message", "model": "claude-test", "usage": {"input_tokens": 1},
+                        "content": [{"type": "tool_use", "id": "bash-id", "name": "Bash",
+                                     "input": {"command": "find . -type f | grep x", "other": "PRIVATE"}}]},
+        }])
+        parsed = parse_claude_file(path, self.pricing)
+        self.assertEqual([item.command_name for item in parsed.command_invocations], ["find", "grep"])
 
 
 if __name__ == "__main__":
