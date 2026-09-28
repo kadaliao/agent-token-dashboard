@@ -1,0 +1,16 @@
+{
+  "name": "ai-history-film",
+  "version": "1.0.0",
+  "description": "一个问题的一百二十六年 · 人工智能简史 1900—2026（竖屏动画短片）",
+  "scripts": {
+    "build": "node build.js",
+    "cues": "node cues.js",
+    "music": "python3 music.py",
+    "render": "node render.js",
+    "preview": "node preview.js"
+  },
+  "dependencies": {
+    "playwright": "^1.56.1"
+  },
+  "private": true
+}

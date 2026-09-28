@@ -1,0 +1,71 @@
+<title>一个问题的一百二十六年</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Archivo:wght@400;500;700;900&family=Bodoni+Moda:ital,wght@0,400;0,700;0,900;1,400&family=IBM+Plex+Mono:wght@400;600&family=JetBrains+Mono:wght@400;700&family=Ma+Shan+Zheng&family=Noto+Sans+KR:wght@700&family=Noto+Sans+SC:wght@300;400;500;700;900&family=Noto+Sans+Symbols+2&family=Noto+Serif+SC:wght@400;700;900&family=Silkscreen:wght@400;700&family=Special+Elite&family=Unbounded:wght@400;700;900&family=UnifrakturMaguntia&family=VT323&family=ZCOOL+QingKe+HuangYou&display=swap">
+<style>
+/* A projection booth: one warm-black room, the film is the only light. Single dark theme by choice. */
+:root {
+  --bg: #0B0A09; --panel: #161310; --fg: #ECE6DA; --dim: #8E877B; --line: #2B2621; --amber: #FFB547;
+  --serif: "Noto Serif SC", "Songti SC", serif; --sans: "Noto Sans SC", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --stage-w: min(100%, calc((100dvh - 150px) * 9 / 16));
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--fg); font-family: var(--sans); }
+.wrap { min-height: 100%; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; gap: 12px; padding-block: 16px; padding-inline: 16px; }
+header { width: var(--stage-w); min-width: 0; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+h1 { margin: 0; font-family: var(--serif); font-weight: 900; font-size: 20px; letter-spacing: .06em; text-wrap: balance; }
+.meta { font-family: var(--mono); font-size: 12px; color: var(--dim); letter-spacing: .08em; }
+#stagewrap { position: relative; width: var(--stage-w); max-width: 100%; aspect-ratio: 9 / 16; }
+#stage { position: absolute; inset: 0; border-radius: 8px; overflow: hidden; background: #000; box-shadow: 0 0 0 1px var(--line), 0 30px 80px rgba(0,0,0,.6); }
+#film { width: 100%; height: 100%; display: block; object-fit: contain; }
+#stagewrap:fullscreen { width: 100%; height: 100%; background: #000; }
+#stagewrap:fullscreen #stage { border-radius: 0; box-shadow: none; }
+.cover { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 10px; padding-bottom: 14%; background: linear-gradient(to bottom, rgba(0,0,0,0) 45%, rgba(0,0,0,.78)); transition: opacity .4s; }
+#stage.on .cover { opacity: 0; pointer-events: none; }
+#stage:not(.ready) .cover button { opacity: .4; pointer-events: none; }
+#bigplay { font: 700 18px var(--sans); color: #120D05; background: var(--amber); border: 0; border-radius: 999px; padding: 14px 30px; cursor: pointer; letter-spacing: .1em; }
+#bigplay:hover { filter: brightness(1.08); }
+.cover p { margin: 0; font-size: 13px; color: #CFC7B8; letter-spacing: .12em; }
+#stage:not(.ready) .cover p::after { content: " · 正在载入字体"; }
+.controls { width: var(--stage-w); max-width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 12px; }
+.controls button { background: none; border: 1px solid var(--line); color: var(--fg); border-radius: 999px; width: 38px; height: 38px; cursor: pointer; display: grid; place-items: center; font-size: 15px; }
+.controls button:hover { border-color: var(--dim); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+#play::before { content: ""; width: 0; height: 0; border-left: 12px solid var(--fg); border-top: 8px solid transparent; border-bottom: 8px solid transparent; margin-left: 3px; }
+#play[data-state="pause"]::before { width: 10px; height: 14px; border: 0; margin: 0; background: linear-gradient(90deg, var(--fg) 0 35%, transparent 35% 65%, var(--fg) 65%); }
+.track { position: relative; min-width: 0; padding-top: 20px; }
+#marks { position: absolute; left: 0; right: 0; top: 0; height: 18px; }
+.mark { position: absolute; transform: translateX(-2px); width: auto !important; height: 18px !important; border: 0 !important; border-left: 1px solid var(--dim) !important; border-radius: 0 !important; padding: 0 0 0 4px; font: 400 12px var(--serif) !important; color: var(--dim) !important; line-height: 18px; display: block !important; }
+.mark:hover { color: var(--amber) !important; }
+#scrub { width: 100%; margin: 0; accent-color: var(--amber); -webkit-appearance: none; appearance: none; height: 4px; border-radius: 4px; background: linear-gradient(90deg, var(--amber) var(--p, 0%), var(--line) var(--p, 0%)); cursor: pointer; }
+#scrub::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--fg); }
+#scrub::-moz-range-thumb { width: 14px; height: 14px; border: 0; border-radius: 50%; background: var(--fg); }
+#tc { font: 400 12px var(--mono); color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.credit { width: var(--stage-w); max-width: 100%; margin: 0; font-size: 12px; color: var(--dim); line-height: 1.6; }
+@media (max-width: 480px) { .controls { gap: 8px; } #tc { font-size: 11px; } }
+@media (prefers-reduced-motion: reduce) { .cover { transition: none; } }
+</style>
+<div class="wrap">
+  <header><h1>一个问题的一百二十六年</h1><span class="meta">人工智能简史 · 1900—2026 · 2:56</span></header>
+  <div id="stagewrap">
+    <div id="stage">
+      <canvas id="film" aria-label="动画短片：人工智能从 1900 年到 2026 年的历史"></canvas>
+      <div class="cover"><button id="bigplay" type="button">▶ 播放</button><p>建议打开声音</p></div>
+    </div>
+  </div>
+  <div class="controls">
+    <button id="play" type="button" data-state="play" aria-label="播放"></button>
+    <div class="track"><div id="marks"></div><input id="scrub" type="range" min="0" max="1000" value="0" aria-label="播放进度"></div>
+    <span id="tc">0:00 / 2:56</span>
+    <button id="fs" type="button" aria-label="全屏">⤢</button>
+  </div>
+  <p class="credit">分镜、每一帧的绘制代码与配乐均由 Claude 生成。空格键播放／暂停，方向键快进快退，点击章节字跳转。</p>
+</div>
+<audio id="audio" src="soundtrack.mp3" preload="auto"></audio>
+<script id="film-src">
+/*FILM*/
+</script>
+<script>
+/*PLAYER*/
+</script>
