@@ -8,11 +8,10 @@
 |---|---|
 | [`insurance-101_1080p60.mp4`](insurance-101_1080p60.mp4) | 1920×1080 · 60fps，96 MB，字幕已烧录 |
 | [`insurance-101_720p60.mp4`](insurance-101_720p60.mp4) | 1280×720 · 60fps，55 MB |
-| 原画质母版 | 1080p60 · 约 6 Mbps · 278 MB，放在本仓库 Release [`insurance-101-v1`](https://github.com/kadaliao/videos/releases/tag/insurance-101-v1) |
 | [`subtitles.srt`](subtitles.srt) | 外挂字幕，112 条，时间轴与画面内字幕一致 |
 | [`cover.png`](cover.png) | 封面 |
 
-仓库里的两个版本是从母版压出来的：为了单文件不超过 100 MB，做了轻度降噪，胶片颗粒会比母版少一些。
+为了让单文件不超过 100 MB，两个版本都做了轻度降噪，胶片颗粒比原始渲染少一些。需要原画质时按下文重新渲染，`tools/master.sh` 输出的 `out/final.mp4` 约 6 Mbps。
 
 ## 内容
 
