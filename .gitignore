@@ -1,13 +1,2 @@
 node_modules/
-film-local.html
-seg_*.mp4
-segs.txt
-*.log
-*.mbtree
-soundtrack.wav
-chk/
-sheet*.png
-spec.png
-test.mp4
-ai-history-1900-2026.mp4
-__pycache__/
+.DS_Store
