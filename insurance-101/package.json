@@ -1,0 +1,15 @@
+{
+  "name": "insurance-101",
+  "version": "1.0.0",
+  "private": true,
+  "description": "保险，到底在保什么 —— 纯代码绘制的保险科普视频",
+  "type": "module",
+  "scripts": {
+    "still": "node src/still.mjs",
+    "render": "node src/render.mjs --jobs 4",
+    "export": "node src/export.mjs"
+  },
+  "dependencies": {
+    "skia-canvas": "^3.0.8"
+  }
+}
