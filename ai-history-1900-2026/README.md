@@ -10,7 +10,8 @@
 
 | 文件 | 说明 |
 |---|---|
-| `ai-history-1900-2026_720p.mp4` | 成片（720×1280，30fps，约 28 MB）。1080p 母版超过 GitHub 单文件 100 MB 限制，需要时用下面的流程重新渲染 |
+| `ai-history-1900-2026_1080p60.mp4` | 成片高清版（1080×1920，60fps，约 87 MB） |
+| `ai-history-1900-2026_720p60.mp4` | 成片轻量版（720×1280，60fps，约 28 MB） |
 | `film.html` | 可在浏览器实时播放的版本，需要与 `soundtrack.mp3` 放在同一目录 |
 | `soundtrack.mp3` | 配乐与音效 |
 | `src/` | 影片源码：`engine.js`（渲染引擎、文字动画、特效、转场）、`scenes1–3.js`（27 个镜头）、`player.js`（播放器与离线渲染接口）、`shell.html`（页面外壳） |
@@ -46,7 +47,7 @@ python3 music.py              # 合成 soundtrack.wav
 node render.js                # 逐帧渲染并混入音频，输出 film.mp4
 ```
 
-`render.js` 可用环境变量调整：`FPS`（默认 30）、`WORKERS`（并行页面数，默认 4）、`T0`/`T1`（只渲染一段）、`OUT`（输出文件名）、`FFMPEG`（ffmpeg 路径）。
+`render.js` 可用环境变量调整：`FPS`（默认 30，成片用的是 `FPS=60`）、`WORKERS`（并行页面数，默认 4）、`T0`/`T1`（只渲染一段）、`OUT`（输出文件名）、`FFMPEG`（ffmpeg 路径）。
 
 `node preview.js "12,50,110" sheet.png` 可以把指定时间点渲染成一张缩略图拼图，方便检查画面。
 
